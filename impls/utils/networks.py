@@ -633,54 +633,59 @@ class Upsample1d(nn.Module):
 
 class Conv1dBlock(nn.Module):
     """
-    JAX/Flax로 포팅된 Conv1dBlock.
-    PyTorch의 nn.Conv1d는 Flax의 nn.Conv(features, kernel_size=(kernel_size,))로 구현됩니다.
+    JAX/Flax로 포팅된 Conv1dBlock. (수정본)
+    helpers.py의 GroupNorm과 Rearrange 로직을 정확히 반영합니다.
     """
 
     inp_channels: int
     out_channels: int
     kernel_size: int
-    mish: bool = True
+    n_groups: int = 8
 
     @nn.compact
     def __call__(self, x):
-        # PyTorch의 padding='causal'과 유사한 효과를 위해 수동 패딩을 사용할 수 있으나,
-        # 원본 diffuser 코드는 'same' 패딩을 사용합니다.
-        # Flax의 nn.Conv는 1D 입력을 (batch, length, channels)로 가정합니다.
-        # 하지만 PyTorch Conv1d는 (batch, channels, length)를 가정합니다.
-        # 원본 diffuser의 TemporalUnet은 einops로 (B, H, T) -> (B, T, H)로 바꾸므로
-        # Flax nn.Conv는 (B, L, C) 형태의 입력을 처리합니다.
-        # 원본은 (B, C, H)이므로, nn.Conv를 사용하기 전에 transpose가 필요할 수 있습니다.
-        # 여기서는 TemporalUnet에서 transpose를 처리한다는 가정 하에 작성합니다.
+        # 원본: nn.Sequential
 
-        # 원본 TemporalUnet에서 (B, H, T) -> (B, T, H)로 transpose하므로,
-        # Conv1dBlock은 (B, H, C) 형태를 (B, H, C_out)로 변환해야 합니다.
-        # 따라서 Flax의 nn.Conv(features, kernel_size)가 (B, L, C)에서 작동하므로,
-        # nn.Conv1d(in, out, kernel)는 nn.Conv(out, (kernel,))로 매핑됩니다.
-
-        # 원본은 (B, C, H)를 사용합니다. (B, T, H)가 아니라.
-        # TemporalUnet.forward: x = einops.rearrange(x, 'b h t -> b t h')
-        # 이 (B, T, H)는 (Batch, Channels, Horizon)을 의미합니다. (B, C, L)
-        # 따라서 Flax의 nn.Conv는 (B, L, C)이므로 (B, H, T)가 맞습니다.
-
-        # [정정] TemporalUnet의 주석과 코드를 다시 봅시다.
-        # x : [ batch x horizon x transition ]
-        # x = einops.rearrange(x, 'b h t -> b t h')
-        # 이 (b, t, h)는 (batch, transition_dim, horizon)입니다. (B, C, L)
-        # Flax의 nn.Conv는 (B, L, C)를 기대하므로, (B, H, T)가 되어야 합니다.
-        # 따라서 x를 (B, H, T)로 transpose 해줘야 합니다.
-        x_transposed = jnp.transpose(x, (0, 2, 1))  # (B, C, L) -> (B, L, C)
+        # 1. nn.Conv1d(..., padding=kernel_size // 2)
+        # (B, C, L) -> (B, L, C)
+        x_transposed = jnp.transpose(x, (0, 2, 1))  # (B, L, C_in)
 
         out = nn.Conv(
             features=self.out_channels,
             kernel_size=(self.kernel_size,),
-            padding="SAME",  # PyTorch의 'same' 패딩
-        )(x_transposed)
+            padding=self.kernel_size // 2,
+        )(
+            x_transposed
+        )  # (B, L, C_out)
 
-        if self.mish:
-            out = nn.mish(out)
+        # 2. GroupNorm 적용을 위해 다시 (B, C, L) 관례로 복귀
+        out = jnp.transpose(out, (0, 2, 1))  # (B, C_out, L)
 
-        return jnp.transpose(out, (0, 2, 1))  # (B, L, C_out) -> (B, C_out, L)
+        # 3. Rearrange + GroupNorm + Rearrange
+        #    원본은 GroupNorm을 4D 텐서 (B, C, 1, L)에 적용합니다.
+        b, c, l = out.shape
+
+        # Rearrange('... -> ... 1 horizon')
+        out_reshaped = out.reshape(b, c, 1, l)  # (B, C, 1, L)
+
+        # nn.GroupNorm(n_groups, out_channels)
+        # Flax의 nn.GroupNorm은 (..., C) 채널이 마지막에 오는 것을 기대합니다.
+        # 따라서 (B, 1, L, C)로 변환
+        out_gn_transposed = jnp.transpose(out_reshaped, (0, 2, 3, 1))  # (B, 1, L, C)
+
+        # Flax의 GroupNorm 적용
+        out_gn = nn.GroupNorm(num_groups=self.n_groups)(out_gn_transposed)
+
+        # 다시 원본 (B, C, 1, L) 형태로 복원
+        out_reshaped = jnp.transpose(out_gn, (0, 3, 1, 2))  # (B, C, 1, L)
+
+        # Rearrange('... 1 horizon -> ... horizon')
+        out = out_reshaped.reshape(b, c, l)  # (B, C, L)
+
+        # 4. nn.Mish()
+        out = jax.nn.mish(out)
+
+        return out
 
 
 # -----------------------------------------------------------------------------#
