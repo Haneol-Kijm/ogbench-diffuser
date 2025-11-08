@@ -705,6 +705,35 @@ class Residual(nn.Module):
         return self.fn(x, *args, **kwargs) + x
 
 
+class LayerNorm(nn.Module):
+    """
+    JAX/Flax로 포팅된 diffuser의 커스텀 LayerNorm.
+    PyTorch의 nn.Parameter를 Flax의 self.param으로 구현합니다.
+    """
+
+    dim: int
+    eps: float = 1e-5
+
+    @nn.compact
+    def __call__(self, x):
+        # g, b 파라미터 생성
+        # Flax에서는 (1, C, 1) 대신 (C,)로 저장하고 브로드캐스팅하는 것이 일반적입니다.
+        g = self.param("g", nn.initializers.ones, (self.dim,))
+        b = self.param("b", nn.initializers.zeros, (self.dim,))
+
+        # (B, C, L) 입력 기준, 채널(C) 축(axis=1)에 대해 var/mean 계산
+        # JAX/Flax의 nn.LayerNorm은 마지막 축을 기준으로 하므로,
+        # 원본과 동일하게 축 1을 기준으로 직접 구현합니다.
+        var = jnp.var(x, axis=1, keepdims=True)
+        mean = jnp.mean(x, axis=1, keepdims=True)
+
+        # g와 b를 (1, C, 1)로 브로드캐스팅
+        g_broadcasted = g[None, :, None]
+        b_broadcasted = b[None, :, None]
+
+        return (x - mean) / jnp.sqrt(var + self.eps) * g_broadcasted + b_broadcasted
+
+
 class PreNorm(nn.Module):
     """
     JAX/Flax로 포팅된 PreNorm.
