@@ -604,35 +604,30 @@ class Downsample1d(nn.Module):
 
 class Upsample1d(nn.Module):
     """
-    JAX/Flax로 포팅된 Upsample1d.
-    PyTorch의 Upsample(mode='nearest') + Conv1d를
-    JAX의 jax.image.resize(method='nearest') + nn.Conv로 구현합니다.
+    JAX/Flax로 포팅된 Upsample1d. (수정본)
+    PyTorch의 nn.ConvTranspose1d에 1:1 대응하는
+    Flax의 nn.ConvTranspose를 사용합니다.
     """
 
     dim: int
 
     @nn.compact
     def __call__(self, x):
-        b, c, h = x.shape
-
         # (B, C, L) -> (B, L, C)
+        # JAX의 nn.ConvTranspose는 (B, L, C) 입력을 기대합니다.
         x_transposed = jnp.transpose(x, (0, 2, 1))
 
-        # jax.image.resize (Upsample)
-        # (B, L, C) -> (B, L*2, C)
-        # jax.image.resize는 3D (H, W, C) 또는 4D (B, H, W, C)를 기대합니다.
-        # 1D resize를 위해 (B, H, 1, C)로 변환 후 (B, H*2, 1, C)로 만들고 다시 squeeze.
-        x_reshaped = x_transposed[:, :, None, :]  # (B, H, 1, C)
-        new_h = h * 2
-        x_resized = jax.image.resize(
-            x_reshaped, shape=(b, new_h, 1, c), method="nearest"
-        )
-        x_upsampled = x_resized[:, :, 0, :]  # (B, H*2, C)
-
-        # nn.Conv
-        out = nn.Conv(features=self.dim, kernel_size=(3,), padding="SAME")(x_upsampled)
+        # PyTorch의 nn.ConvTranspose1d(dim, dim, 4, 2, 1)와 동일한 연산
+        # kernel_size=4, stride=2, padding=1
+        out = nn.ConvTranspose(
+            features=self.dim,
+            kernel_size=(4,),
+            strides=(2,),
+            padding=1,  # PyTorch의 padding=1과 동일하게 작동
+        )(x_transposed)
 
         # (B, L', C) -> (B, C, L')
+        # 다시 (B, C, L) 관례로 복귀
         return jnp.transpose(out, (0, 2, 1))
 
 
