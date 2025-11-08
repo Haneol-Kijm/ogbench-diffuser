@@ -859,9 +859,9 @@ class ResidualTemporalBlock(nn.Module):
         # PyTorch의 nn.Sequential
         self.time_mlp = nn.Sequential(
             [
-                nn.mish,
-                nn.Linear(self.embed_dim),
-                # Rearrange('batch t -> batch t 1') 대신 expand_dims
+                jax.nn.mish,
+                nn.Dense(self.embed_dim),
+                lambda x: x[:, :, None],
             ]
         )
 
@@ -877,21 +877,16 @@ class ResidualTemporalBlock(nn.Module):
         x : [ B x C x H ] (batch, transition_dim, horizon)
         t : [ B x D ] (batch, embed_dim)
         """
-        out = self.blocks[0](x)  # (B, C_out, H)
 
-        # time_mlp 처리
-        t_emb = self.time_mlp(t)  # (B, C_out)
-        t_emb = t_emb[:, :, None]  # (B, C_out) -> (B, C_out, 1)
-
-        out = out + t_emb  # (B, C_out, H) + (B, C_out, 1) -> 브로드캐스팅
-
+        out = self.blocks[0](x) + self.time_mlp(
+            t
+        )  # (B, C_out, H) + (B, C_out, 1) -> 브로드캐스팅
         out = self.blocks[1](out)  # (B, C_out, H)
 
-        # residual_conv 처리
-        # (B, C, H) -> (B, H, C)
-        x_transposed = jnp.transpose(x, (0, 2, 1))
-
         if self.inp_channels != self.out_channels:
+            # residual_conv 처리
+            # (B, C, H) -> (B, H, C)
+            x_transposed = jnp.transpose(x, (0, 2, 1))
             res = self.residual_conv(x_transposed)  # (B, H, C_out)
             res = jnp.transpose(res, (0, 2, 1))  # (B, C_out, H)
         else:
@@ -925,6 +920,7 @@ class TemporalUnet(nn.Module):
     def setup(self):
         dims = [self.transition_dim, *map(lambda m: self.dim * m, self.dim_mults)]
         in_out = list(zip(dims[:-1], dims[1:]))
+        print(f"[ models/temporal ] Channel dimensions: {in_out}")
 
         time_dim = self.dim
         self.time_mlp = nn.Sequential(
@@ -939,6 +935,7 @@ class TemporalUnet(nn.Module):
         self.downs = []
         self.ups = []
         num_resolutions = len(in_out)
+        print(in_out)
 
         current_horizon = self.horizon
 
@@ -954,7 +951,7 @@ class TemporalUnet(nn.Module):
                         dim_out, dim_out, embed_dim=time_dim, horizon=current_horizon
                     ),
                     (
-                        Residual(PreNorm(LinearAttention()))
+                        Residual(PreNorm(dim_out, LinearAttention(dim_out)))
                         if self.attention
                         else lambda x: x
                     ),
@@ -970,7 +967,9 @@ class TemporalUnet(nn.Module):
             mid_dim, mid_dim, embed_dim=time_dim, horizon=current_horizon
         )
         self.mid_attn = (
-            Residual(PreNorm(LinearAttention())) if self.attention else lambda x: x
+            Residual(PreNorm(mid_dim, LinearAttention(mid_dim)))
+            if self.attention
+            else lambda x: x
         )
         self.mid_block2 = ResidualTemporalBlock(
             mid_dim, mid_dim, embed_dim=time_dim, horizon=current_horizon
@@ -988,7 +987,7 @@ class TemporalUnet(nn.Module):
                         dim_in, dim_in, embed_dim=time_dim, horizon=current_horizon
                     ),
                     (
-                        Residual(PreNorm(LinearAttention()))
+                        Residual(PreNorm(dim_in, LinearAttention(dim_in)))
                         if self.attention
                         else lambda x: x
                     ),
@@ -1002,8 +1001,10 @@ class TemporalUnet(nn.Module):
         self.final_conv = nn.Sequential(
             [
                 Conv1dBlock(self.dim, self.dim, kernel_size=5),
+                lambda x: jnp.transpose(x, (0, 2, 1)),
                 # nn.Conv1d(dim, transition_dim, 1)
                 nn.Conv(features=self.transition_dim, kernel_size=(1,)),
+                lambda x: jnp.transpose(x, (0, 2, 1)),
             ]
         )
 
@@ -1036,6 +1037,7 @@ class TemporalUnet(nn.Module):
         # ups 리스트는 setup에서 생성된 Python 리스트
         for resnet, resnet2, attn, upsample in self.ups:
             # PyTorch: x = torch.cat((x, h.pop()), dim=1)
+            # skip-connection of U-Net
             x = jnp.concatenate((x, h.pop()), axis=1)  # (B, C, L) 기준 C (channel) 축
             x = resnet(x, t)
             x = resnet2(x, t)
@@ -1043,11 +1045,7 @@ class TemporalUnet(nn.Module):
             x = upsample(x)
 
         # final_conv는 nn.Conv를 포함하므로 (B, L, C) 입력을 받아야 함
-        # (B, C, L) -> (B, L, C)
-        x_transposed = jnp.transpose(x, (0, 2, 1))
-        x_out = self.final_conv(x_transposed)  # (B, L, C_out)
-        # (B, L, C_out) -> (B, C_out, L)
-        x = jnp.transpose(x_out, (0, 2, 1))
+        x = self.final_conv(x)
 
         # PyTorch: x = einops.rearrange(x, 'b t h -> b h t')
         # (B, T, H) -> (B, H, T)
