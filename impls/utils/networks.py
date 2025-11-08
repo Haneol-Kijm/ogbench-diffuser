@@ -9,15 +9,15 @@ import jax.numpy as jnp
 
 def default_init(scale=1.0):
     """Default kernel initializer."""
-    return nn.initializers.variance_scaling(scale, 'fan_avg', 'uniform')
+    return nn.initializers.variance_scaling(scale, "fan_avg", "uniform")
 
 
 def ensemblize(cls, num_qs, out_axes=0, **kwargs):
     """Ensemblize a module."""
     return nn.vmap(
         cls,
-        variable_axes={'params': 0},
-        split_rngs={'params': True},
+        variable_axes={"params": 0},
+        split_rngs={"params": True},
         in_axes=None,
         out_axes=out_axes,
         axis_size=num_qs,
@@ -78,7 +78,7 @@ class Param(nn.Module):
 
     @nn.compact
     def __call__(self):
-        return self.param('value', init_fn=lambda key: jnp.full((), self.init_value))
+        return self.param("value", init_fn=lambda key: jnp.full((), self.init_value))
 
 
 class LogParam(nn.Module):
@@ -88,7 +88,9 @@ class LogParam(nn.Module):
 
     @nn.compact
     def __call__(self):
-        log_value = self.param('log_value', init_fn=lambda key: jnp.full((), jnp.log(self.init_value)))
+        log_value = self.param(
+            "log_value", init_fn=lambda key: jnp.full((), jnp.log(self.init_value))
+        )
         return jnp.exp(log_value)
 
 
@@ -167,12 +169,18 @@ class GCActor(nn.Module):
 
     def setup(self):
         self.actor_net = MLP(self.hidden_dims, activate_final=True)
-        self.mean_net = nn.Dense(self.action_dim, kernel_init=default_init(self.final_fc_init_scale))
+        self.mean_net = nn.Dense(
+            self.action_dim, kernel_init=default_init(self.final_fc_init_scale)
+        )
         if self.state_dependent_std:
-            self.log_std_net = nn.Dense(self.action_dim, kernel_init=default_init(self.final_fc_init_scale))
+            self.log_std_net = nn.Dense(
+                self.action_dim, kernel_init=default_init(self.final_fc_init_scale)
+            )
         else:
             if not self.const_std:
-                self.log_stds = self.param('log_stds', nn.initializers.zeros, (self.action_dim,))
+                self.log_stds = self.param(
+                    "log_stds", nn.initializers.zeros, (self.action_dim,)
+                )
 
     def __call__(
         self,
@@ -209,9 +217,13 @@ class GCActor(nn.Module):
 
         log_stds = jnp.clip(log_stds, self.log_std_min, self.log_std_max)
 
-        distribution = distrax.MultivariateNormalDiag(loc=means, scale_diag=jnp.exp(log_stds) * temperature)
+        distribution = distrax.MultivariateNormalDiag(
+            loc=means, scale_diag=jnp.exp(log_stds) * temperature
+        )
         if self.tanh_squash:
-            distribution = TransformedWithMode(distribution, distrax.Block(distrax.Tanh(), ndims=1))
+            distribution = TransformedWithMode(
+                distribution, distrax.Block(distrax.Tanh(), ndims=1)
+            )
 
         return distribution
 
@@ -233,7 +245,9 @@ class GCDiscreteActor(nn.Module):
 
     def setup(self):
         self.actor_net = MLP(self.hidden_dims, activate_final=True)
-        self.logit_net = nn.Dense(self.action_dim, kernel_init=default_init(self.final_fc_init_scale))
+        self.logit_net = nn.Dense(
+            self.action_dim, kernel_init=default_init(self.final_fc_init_scale)
+        )
 
     def __call__(
         self,
@@ -261,7 +275,9 @@ class GCDiscreteActor(nn.Module):
 
         logits = self.logit_net(outputs)
 
-        distribution = distrax.Categorical(logits=logits / jnp.maximum(1e-6, temperature))
+        distribution = distrax.Categorical(
+            logits=logits / jnp.maximum(1e-6, temperature)
+        )
 
         return distribution
 
@@ -287,7 +303,9 @@ class GCValue(nn.Module):
         mlp_module = MLP
         if self.ensemble:
             mlp_module = ensemblize(mlp_module, 2)
-        value_net = mlp_module((*self.hidden_dims, 1), activate_final=False, layer_norm=self.layer_norm)
+        value_net = mlp_module(
+            (*self.hidden_dims, 1), activate_final=False, layer_norm=self.layer_norm
+        )
 
         self.value_net = value_net
 
@@ -353,8 +371,16 @@ class GCBilinearValue(nn.Module):
         if self.ensemble:
             mlp_module = ensemblize(mlp_module, 2)
 
-        self.phi = mlp_module((*self.hidden_dims, self.latent_dim), activate_final=False, layer_norm=self.layer_norm)
-        self.psi = mlp_module((*self.hidden_dims, self.latent_dim), activate_final=False, layer_norm=self.layer_norm)
+        self.phi = mlp_module(
+            (*self.hidden_dims, self.latent_dim),
+            activate_final=False,
+            layer_norm=self.layer_norm,
+        )
+        self.psi = mlp_module(
+            (*self.hidden_dims, self.latent_dim),
+            activate_final=False,
+            layer_norm=self.layer_norm,
+        )
 
     def __call__(self, observations, goals, actions=None, info=False):
         """Return the value/critic function.
@@ -418,7 +444,11 @@ class GCMRNValue(nn.Module):
     encoder: nn.Module = None
 
     def setup(self):
-        self.phi = MLP((*self.hidden_dims, self.latent_dim), activate_final=False, layer_norm=self.layer_norm)
+        self.phi = MLP(
+            (*self.hidden_dims, self.latent_dim),
+            activate_final=False,
+            layer_norm=self.layer_norm,
+        )
 
     def __call__(self, observations, goals, is_phi=False, info=False):
         """Return the MRN value function.
@@ -473,7 +503,11 @@ class GCIQEValue(nn.Module):
     encoder: nn.Module = None
 
     def setup(self):
-        self.phi = MLP((*self.hidden_dims, self.latent_dim), activate_final=False, layer_norm=self.layer_norm)
+        self.phi = MLP(
+            (*self.hidden_dims, self.latent_dim),
+            activate_final=False,
+            layer_norm=self.layer_norm,
+        )
         self.alpha = Param()
 
     def __call__(self, observations, goals, is_phi=False, info=False):
@@ -502,12 +536,14 @@ class GCIQEValue(nn.Module):
         xy = jnp.concatenate(jnp.broadcast_arrays(x, y), axis=-1)
         ixy = xy.argsort(axis=-1)
         sxy = jnp.take_along_axis(xy, ixy, axis=-1)
-        neg_inc_copies = jnp.take_along_axis(valid, ixy % self.dim_per_component, axis=-1) * jnp.where(
-            ixy < self.dim_per_component, -1, 1
-        )
+        neg_inc_copies = jnp.take_along_axis(
+            valid, ixy % self.dim_per_component, axis=-1
+        ) * jnp.where(ixy < self.dim_per_component, -1, 1)
         neg_inp_copies = jnp.cumsum(neg_inc_copies, axis=-1)
         neg_f = -1.0 * (neg_inp_copies < 0)
-        neg_incf = jnp.concatenate([neg_f[..., :1], neg_f[..., 1:] - neg_f[..., :-1]], axis=-1)
+        neg_incf = jnp.concatenate(
+            [neg_f[..., :1], neg_f[..., 1:] - neg_f[..., :-1]], axis=-1
+        )
         components = (sxy * neg_incf).sum(axis=-1)
         v = alpha * components.mean(axis=-1) + (1 - alpha) * components.max(axis=-1)
 
@@ -515,3 +551,418 @@ class GCIQEValue(nn.Module):
             return v, phi_s, phi_g
         else:
             return v
+
+
+from typing import Callable
+
+# --- JAX/Flax로 포팅된 Helper 모듈 ---
+# 원본: jannerm/diffuser/diffuser/models/helpers.py
+
+# -----------------------------------------------------------------------------#
+# ---------------------------------- modules ----------------------------------#
+# -----------------------------------------------------------------------------#
+
+
+class SinusoidalPosEmb(nn.Module):
+    """
+    JAX/Flax로 포팅된 SinusoidalPosEmb.
+    PyTorch 원본과 로직은 동일합니다.
+    """
+
+    dim: int
+
+    @nn.compact
+    def __call__(self, x):
+        half_dim = self.dim // 2
+        div_term = jnp.exp(jnp.arange(half_dim) * -(jnp.log(10000.0) / (half_dim - 1)))
+        pe = x[..., None] * div_term
+        pe = jnp.concatenate([jnp.sin(pe), jnp.cos(pe)], axis=-1)
+        return pe
+
+
+class Downsample1d(nn.Module):
+    """
+    JAX/Flax로 포팅된 Downsample1d.
+    Conv1d 대신 nn.Conv를 사용합니다.
+    """
+
+    dim: int
+
+    @nn.compact
+    def __call__(self, x):
+        # (B, C, L) -> (B, L, C)
+        x_transposed = jnp.transpose(x, (0, 2, 1))
+
+        # nn.Conv(stride=2)
+        out = nn.Conv(
+            features=self.dim, kernel_size=(3,), strides=(2,), padding="SAME"
+        )(x_transposed)
+
+        # (B, L', C) -> (B, C, L')
+        return jnp.transpose(out, (0, 2, 1))
+
+
+class Upsample1d(nn.Module):
+    """
+    JAX/Flax로 포팅된 Upsample1d.
+    PyTorch의 Upsample(mode='nearest') + Conv1d를
+    JAX의 jax.image.resize(method='nearest') + nn.Conv로 구현합니다.
+    """
+
+    dim: int
+
+    @nn.compact
+    def __call__(self, x):
+        b, c, h = x.shape
+
+        # (B, C, L) -> (B, L, C)
+        x_transposed = jnp.transpose(x, (0, 2, 1))
+
+        # jax.image.resize (Upsample)
+        # (B, L, C) -> (B, L*2, C)
+        # jax.image.resize는 3D (H, W, C) 또는 4D (B, H, W, C)를 기대합니다.
+        # 1D resize를 위해 (B, H, 1, C)로 변환 후 (B, H*2, 1, C)로 만들고 다시 squeeze.
+        x_reshaped = x_transposed[:, :, None, :]  # (B, H, 1, C)
+        new_h = h * 2
+        x_resized = jax.image.resize(
+            x_reshaped, shape=(b, new_h, 1, c), method="nearest"
+        )
+        x_upsampled = x_resized[:, :, 0, :]  # (B, H*2, C)
+
+        # nn.Conv
+        out = nn.Conv(features=self.dim, kernel_size=(3,), padding="SAME")(x_upsampled)
+
+        # (B, L', C) -> (B, C, L')
+        return jnp.transpose(out, (0, 2, 1))
+
+
+class Conv1dBlock(nn.Module):
+    """
+    JAX/Flax로 포팅된 Conv1dBlock.
+    PyTorch의 nn.Conv1d는 Flax의 nn.Conv(features, kernel_size=(kernel_size,))로 구현됩니다.
+    """
+
+    inp_channels: int
+    out_channels: int
+    kernel_size: int
+    mish: bool = True
+
+    @nn.compact
+    def __call__(self, x):
+        # PyTorch의 padding='causal'과 유사한 효과를 위해 수동 패딩을 사용할 수 있으나,
+        # 원본 diffuser 코드는 'same' 패딩을 사용합니다.
+        # Flax의 nn.Conv는 1D 입력을 (batch, length, channels)로 가정합니다.
+        # 하지만 PyTorch Conv1d는 (batch, channels, length)를 가정합니다.
+        # 원본 diffuser의 TemporalUnet은 einops로 (B, H, T) -> (B, T, H)로 바꾸므로
+        # Flax nn.Conv는 (B, L, C) 형태의 입력을 처리합니다.
+        # 원본은 (B, C, H)이므로, nn.Conv를 사용하기 전에 transpose가 필요할 수 있습니다.
+        # 여기서는 TemporalUnet에서 transpose를 처리한다는 가정 하에 작성합니다.
+
+        # 원본 TemporalUnet에서 (B, H, T) -> (B, T, H)로 transpose하므로,
+        # Conv1dBlock은 (B, H, C) 형태를 (B, H, C_out)로 변환해야 합니다.
+        # 따라서 Flax의 nn.Conv(features, kernel_size)가 (B, L, C)에서 작동하므로,
+        # nn.Conv1d(in, out, kernel)는 nn.Conv(out, (kernel,))로 매핑됩니다.
+
+        # 원본은 (B, C, H)를 사용합니다. (B, T, H)가 아니라.
+        # TemporalUnet.forward: x = einops.rearrange(x, 'b h t -> b t h')
+        # 이 (B, T, H)는 (Batch, Channels, Horizon)을 의미합니다. (B, C, L)
+        # 따라서 Flax의 nn.Conv는 (B, L, C)이므로 (B, H, T)가 맞습니다.
+
+        # [정정] TemporalUnet의 주석과 코드를 다시 봅시다.
+        # x : [ batch x horizon x transition ]
+        # x = einops.rearrange(x, 'b h t -> b t h')
+        # 이 (b, t, h)는 (batch, transition_dim, horizon)입니다. (B, C, L)
+        # Flax의 nn.Conv는 (B, L, C)를 기대하므로, (B, H, T)가 되어야 합니다.
+        # 따라서 x를 (B, H, T)로 transpose 해줘야 합니다.
+        x_transposed = jnp.transpose(x, (0, 2, 1))  # (B, C, L) -> (B, L, C)
+
+        out = nn.Conv(
+            features=self.out_channels,
+            kernel_size=(self.kernel_size,),
+            padding="SAME",  # PyTorch의 'same' 패딩
+        )(x_transposed)
+
+        if self.mish:
+            out = nn.mish(out)
+
+        return jnp.transpose(out, (0, 2, 1))  # (B, L, C_out) -> (B, C_out, L)
+
+
+# -----------------------------------------------------------------------------#
+# --------------------------------- attention ---------------------------------#
+# -----------------------------------------------------------------------------#
+
+
+class Residual(nn.Module):
+    """
+    JAX/Flax로 포팅된 Residual.
+    """
+
+    fn: Callable
+
+    @nn.compact
+    def __call__(self, x, *args, **kwargs):
+        return self.fn(x, *args, **kwargs) + x
+
+
+class PreNorm(nn.Module):
+    """
+    JAX/Flax로 포팅된 PreNorm.
+    """
+
+    fn: Callable
+
+    @nn.compact
+    def __call__(self, x, *args, **kwargs):
+        x = nn.LayerNorm()(x)
+        return self.fn(x, *args, **kwargs)
+
+
+class LinearAttention(nn.Module):
+    """
+    JAX/Flax로 포팅된 LinearAttention.
+    einops 대신 jnp.einsum을 사용합니다.
+    """
+
+    @nn.compact
+    def __call__(self, x):
+        b, c, h = x.shape
+        qkv = nn.Conv(features=c * 3, kernel_size=(1,))(
+            jnp.transpose(x, (0, 2, 1))
+        )  # (B, L, C*3)
+        qkv = jnp.transpose(qkv, (0, 2, 1))  # (B, C*3, L)
+        q, k, v = jnp.array_split(qkv, 3, axis=1)
+
+        q = nn.softmax(q, axis=-1)
+        k = nn.softmax(k, axis=-2)
+
+        context = jnp.einsum("b c h, b c w -> b h w", k, v)
+        out = jnp.einsum("b h w, b c w -> b c h", context, q)
+        return out
+
+
+# --- JAX/Flax로 포팅된 메인 모델 ---
+# 원본: jannerm/diffuser/diffuser/models/temporal.py
+
+
+class ResidualTemporalBlock(nn.Module):
+    """
+    JAX/Flax로 포팅된 ResidualTemporalBlock.
+    PyTorch의 nn.ModuleList는 Flax의 setup()에서 Python 리스트로 구현합니다.
+    """
+
+    inp_channels: int
+    out_channels: int
+    embed_dim: int
+    horizon: int
+    kernel_size: int = 5
+
+    blocks: Sequence[Callable] = None
+    time_mlp: Callable = None
+    residual_conv: Callable = None
+
+    def setup(self):
+        # PyTorch의 nn.ModuleList
+        self.blocks = [
+            Conv1dBlock(self.inp_channels, self.out_channels, self.kernel_size),
+            Conv1dBlock(self.out_channels, self.out_channels, self.kernel_size),
+        ]
+
+        # PyTorch의 nn.Sequential
+        self.time_mlp = nn.Sequential(
+            [
+                nn.mish,
+                nn.Linear(self.embed_dim),
+                # Rearrange('batch t -> batch t 1') 대신 expand_dims
+            ]
+        )
+
+        # PyTorch의 nn.Conv1d(1) 또는 nn.Identity
+        self.residual_conv = (
+            nn.Conv(features=self.out_channels, kernel_size=(1,))
+            if self.inp_channels != self.out_channels
+            else lambda x: x
+        )
+
+    def __call__(self, x, t):
+        """
+        x : [ B x C x H ] (batch, transition_dim, horizon)
+        t : [ B x D ] (batch, embed_dim)
+        """
+        out = self.blocks[0](x)  # (B, C_out, H)
+
+        # time_mlp 처리
+        t_emb = self.time_mlp(t)  # (B, C_out)
+        t_emb = t_emb[:, :, None]  # (B, C_out) -> (B, C_out, 1)
+
+        out = out + t_emb  # (B, C_out, H) + (B, C_out, 1) -> 브로드캐스팅
+
+        out = self.blocks[1](out)  # (B, C_out, H)
+
+        # residual_conv 처리
+        # (B, C, H) -> (B, H, C)
+        x_transposed = jnp.transpose(x, (0, 2, 1))
+
+        if self.inp_channels != self.out_channels:
+            res = self.residual_conv(x_transposed)  # (B, H, C_out)
+            res = jnp.transpose(res, (0, 2, 1))  # (B, C_out, H)
+        else:
+            res = self.residual_conv(x)  # Identity
+
+        return out + res
+
+
+class TemporalUnet(nn.Module):
+    """
+    JAX/Flax로 포팅된 TemporalUnet.
+    PyTorch의 __init__ 로직이 setup()으로 이동했습니다.
+    """
+
+    horizon: int
+    transition_dim: int
+    cond_dim: int
+    dim: int = 32
+    dim_mults: Sequence[int] = (1, 2, 4, 8)
+    attention: bool = False
+
+    # Flax에서 모듈 리스트는 setup에서 동적으로 생성
+    time_mlp: Callable = None
+    downs: Sequence = None
+    ups: Sequence = None
+    mid_block1: Callable = None
+    mid_attn: Callable = None
+    mid_block2: Callable = None
+    final_conv: Callable = None
+
+    def setup(self):
+        dims = [self.transition_dim, *map(lambda m: self.dim * m, self.dim_mults)]
+        in_out = list(zip(dims[:-1], dims[1:]))
+
+        time_dim = self.dim
+        self.time_mlp = nn.Sequential(
+            [
+                SinusoidalPosEmb(self.dim),
+                nn.Linear(self.dim * 4),
+                nn.mish,
+                nn.Linear(self.dim),
+            ]
+        )
+
+        self.downs = []
+        self.ups = []
+        num_resolutions = len(in_out)
+
+        current_horizon = self.horizon
+
+        for ind, (dim_in, dim_out) in enumerate(in_out):
+            is_last = ind >= (num_resolutions - 1)
+
+            self.downs.append(
+                [
+                    ResidualTemporalBlock(
+                        dim_in, dim_out, embed_dim=time_dim, horizon=current_horizon
+                    ),
+                    ResidualTemporalBlock(
+                        dim_out, dim_out, embed_dim=time_dim, horizon=current_horizon
+                    ),
+                    (
+                        Residual(PreNorm(LinearAttention()))
+                        if self.attention
+                        else lambda x: x
+                    ),
+                    Downsample1d(dim_out) if not is_last else lambda x: x,
+                ]
+            )
+
+            if not is_last:
+                current_horizon = current_horizon // 2
+
+        mid_dim = dims[-1]
+        self.mid_block1 = ResidualTemporalBlock(
+            mid_dim, mid_dim, embed_dim=time_dim, horizon=current_horizon
+        )
+        self.mid_attn = (
+            Residual(PreNorm(LinearAttention())) if self.attention else lambda x: x
+        )
+        self.mid_block2 = ResidualTemporalBlock(
+            mid_dim, mid_dim, embed_dim=time_dim, horizon=current_horizon
+        )
+
+        for ind, (dim_in, dim_out) in enumerate(reversed(in_out[1:])):
+            is_last = ind >= (num_resolutions - 1)
+
+            self.ups.append(
+                [
+                    ResidualTemporalBlock(
+                        dim_out * 2, dim_in, embed_dim=time_dim, horizon=current_horizon
+                    ),
+                    ResidualTemporalBlock(
+                        dim_in, dim_in, embed_dim=time_dim, horizon=current_horizon
+                    ),
+                    (
+                        Residual(PreNorm(LinearAttention()))
+                        if self.attention
+                        else lambda x: x
+                    ),
+                    Upsample1d(dim_in) if not is_last else lambda x: x,
+                ]
+            )
+
+            if not is_last:
+                current_horizon = current_horizon * 2
+
+        self.final_conv = nn.Sequential(
+            [
+                Conv1dBlock(self.dim, self.dim, kernel_size=5),
+                # nn.Conv1d(dim, transition_dim, 1)
+                nn.Conv(features=self.transition_dim, kernel_size=(1,)),
+            ]
+        )
+
+    def __call__(self, x, cond, time):
+        """
+        x : [ B x H x T ] (batch, horizon, transition_dim)
+        cond: [ B x C_cond ] (batch, cond_dim) - 포팅 시 cond 처리는 생략 (원본도 사용 안 함)
+        time: [ B ] (batch,)
+        """
+
+        # PyTorch: x = einops.rearrange(x, 'b h t -> b t h')
+        # (B, H, T) -> (B, T, H)
+        x = jnp.transpose(x, (0, 2, 1))
+
+        t = self.time_mlp(time)
+        h = []
+
+        # downs 리스트는 setup에서 생성된 Python 리스트
+        for resnet, resnet2, attn, downsample in self.downs:
+            x = resnet(x, t)
+            x = resnet2(x, t)
+            x = attn(x)
+            h.append(x)
+            x = downsample(x)
+
+        x = self.mid_block1(x, t)
+        x = self.mid_attn(x)
+        x = self.mid_block2(x, t)
+
+        # ups 리스트는 setup에서 생성된 Python 리스트
+        for resnet, resnet2, attn, upsample in self.ups:
+            # PyTorch: x = torch.cat((x, h.pop()), dim=1)
+            x = jnp.concatenate((x, h.pop()), axis=1)  # (B, C, L) 기준 C (channel) 축
+            x = resnet(x, t)
+            x = resnet2(x, t)
+            x = attn(x)
+            x = upsample(x)
+
+        # final_conv는 nn.Conv를 포함하므로 (B, L, C) 입력을 받아야 함
+        # (B, C, L) -> (B, L, C)
+        x_transposed = jnp.transpose(x, (0, 2, 1))
+        x_out = self.final_conv(x_transposed)  # (B, L, C_out)
+        # (B, L, C_out) -> (B, C_out, L)
+        x = jnp.transpose(x_out, (0, 2, 1))
+
+        # PyTorch: x = einops.rearrange(x, 'b t h -> b h t')
+        # (B, T, H) -> (B, H, T)
+        x = jnp.transpose(x, (0, 2, 1))
+
+        return x
