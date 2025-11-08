@@ -739,12 +739,18 @@ class PreNorm(nn.Module):
     JAX/Flax로 포팅된 PreNorm.
     """
 
+    dim: int
     fn: Callable
 
+    norm: Callable = None  # setup에서 정의
+
+    def setup(self):
+        self.norm = LayerNorm(self.dim)  # 커스텀 LayerNorm 사용
+
     @nn.compact
-    def __call__(self, x, *args, **kwargs):
-        x = nn.LayerNorm()(x)
-        return self.fn(x, *args, **kwargs)
+    def __call__(self, x):
+        x = self.norm()(x)
+        return self.fn(x)
 
 
 class LinearAttention(nn.Module):
