@@ -555,6 +555,8 @@ class GCIQEValue(nn.Module):
 
 from typing import Callable
 
+import einops
+
 # --- JAX/Flax로 포팅된 Helper 모듈 ---
 # 원본: jannerm/diffuser/diffuser/models/helpers.py
 
@@ -755,25 +757,95 @@ class PreNorm(nn.Module):
 
 class LinearAttention(nn.Module):
     """
-    JAX/Flax로 포팅된 LinearAttention.
-    einops 대신 jnp.einsum을 사용합니다.
+    JAX/Flax로 포팅된 LinearAttention. (수정본)
+    원본의 Multi-Head 로직과 einops를 정확히 반영합니다.
     """
+
+    dim: int
+    heads: int = 4
+    dim_head: int = 32
+
+    scale: float = None
+    hidden_dim: int = None
+    to_qkv: Callable = None
+    to_out: Callable = None
+
+    def setup(self):
+        """
+        PyTorch의 __init__ 로직을 setup으로 이동합니다.
+        """
+        self.scale = self.dim_head**-0.5
+        self.hidden_dim = self.dim_head * self.heads
+
+        # 원본: nn.Conv1d(dim, hidden_dim * 3, 1, bias=False)
+        # JAX: nn.Conv(features, kernel_size=(1,), use_bias=False)
+        self.to_qkv = nn.Conv(
+            features=self.hidden_dim * 3, kernel_size=(1,), use_bias=False
+        )
+
+        # 원본: nn.Conv1d(hidden_dim, dim, 1)
+        # JAX: nn.Conv(features, kernel_size=(1,))
+        self.to_out = nn.Conv(features=self.dim, kernel_size=(1,))
 
     @nn.compact
     def __call__(self, x):
-        b, c, h = x.shape
-        qkv = nn.Conv(features=c * 3, kernel_size=(1,))(
-            jnp.transpose(x, (0, 2, 1))
-        )  # (B, L, C*3)
-        qkv = jnp.transpose(qkv, (0, 2, 1))  # (B, C*3, L)
-        q, k, v = jnp.array_split(qkv, 3, axis=1)
+        """
+        x는 (B, C, L) 관례를 따름 (C == dim)
+        """
 
-        q = nn.softmax(q, axis=-1)
-        k = nn.softmax(k, axis=-2)
+        # 1. JAX Conv를 위해 (B, L, C)로 transpose
+        x_transposed = jnp.transpose(x, (0, 2, 1))  # (B, L, C)
 
-        context = jnp.einsum("b c h, b c w -> b h w", k, v)
-        out = jnp.einsum("b h w, b c w -> b c h", context, q)
-        return out
+        # 2. QKV 프로젝션
+        # (B, L, C) -> (B, L, H*D*3)
+        qkv_transposed = self.to_qkv(x_transposed)
+
+        # 3. PyTorch의 einops (B, C, L) 관례로 복귀
+        # (B, L, H*D*3) -> (B, H*D*3, L)
+        qkv = jnp.transpose(qkv_transposed, (0, 2, 1))
+
+        # 4. Q, K, V로 분리 (채널 축 기준)
+        # 원본: .chunk(3, dim=1)
+        q, k, v = jnp.array_split(qkv, 3, axis=1)  # 각각 (B, H*D, L)
+
+        # 5. Head 차원 분리
+        # 원본: einops.rearrange(t, 'b (h c) d -> b h c d', h=self.heads)
+        # JAX에서도 einops를 그대로 사용 (h=heads, c=dim_head, d=length)
+        q = einops.rearrange(q, "b (h c) l -> b h c l", h=self.heads)
+        k = einops.rearrange(k, "b (h c) l -> b h c l", h=self.heads)
+        v = einops.rearrange(v, "b (h c) l -> b h c l", h=self.heads)
+
+        # 6. 원본 로직 (Scale, Softmax, Einsum)
+        q = q * self.scale
+
+        k = nn.softmax(k, axis=-1)  # L (length) 축에 대해 소프트맥스
+
+        # 원본: context = torch.einsum('b h d n, b h e n -> b h d e', k, v)
+        # k: (B, H, D_head, L) -> 'b h d n'
+        # v: (B, H, D_head, L) -> 'b h e n' (d와 e는 같은 D_head)
+        # L (n) 축을 내적
+        context = jnp.einsum(
+            "b h d n, b h e n -> b h d e", k, v
+        )  # (B, H, D_head, D_head)
+
+        # 원본: out = torch.einsum('b h d e, b h d n -> b h e n', context, q)
+        # context: (B, H, D_head, D_head) -> 'b h d e'
+        # q: (B, H, D_head, L) -> 'b h d n'
+        # D_head (d) 축을 내적
+        out = jnp.einsum("b h d e, b h d n -> b h e n", context, q)  # (B, H, D_head, L)
+
+        # 7. Head 차원 병합
+        # 원본: out = einops.rearrange(out, 'b h c d -> b (h c) d')
+        out = einops.rearrange(out, "b h c l -> b (h c) l")  # (B, H*D, L)
+
+        # 8. JAX Conv를 위해 (B, L, C)로 transpose
+        out_transposed = jnp.transpose(out, (0, 2, 1))  # (B, L, H*D)
+
+        # 9. 최종 프로젝션
+        out_proj = self.to_out(out_transposed)  # (B, L, C_final)
+
+        # 10. (B, C, L) 관례로 복귀
+        return jnp.transpose(out_proj, (0, 2, 1))
 
 
 # --- JAX/Flax로 포팅된 메인 모델 ---
