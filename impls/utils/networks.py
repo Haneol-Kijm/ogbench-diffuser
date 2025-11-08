@@ -1052,3 +1052,125 @@ class TemporalUnet(nn.Module):
         x = jnp.transpose(x, (0, 2, 1))
 
         return x
+
+
+class ValueFunction(nn.Module):
+    horizon: int
+    transition_dim: int
+    cond_dim: int
+    dim: int = 32
+    dim_mults: Sequence[int] = (1, 2, 4, 8)
+    out_dim: int = 1
+
+    def setup(self):
+        horizon_curr = self.horizon
+
+        dims = [self.transition_dim, *map(lambda m: self.dim * m, self.dim_mults)]
+        in_out = list(zip(dims[:-1], dims[1:]))
+
+        self.time_dim = self.dim
+        self.time_mlp = nn.Sequential(
+            [
+                SinusoidalPosEmb(self.time_dim),
+                nn.Dense(self.time_dim * 4),
+                jax.nn.mish,
+                nn.Dense(self.time_dim),
+            ]
+        )
+
+        self.blocks = []
+        num_resolutions = len(in_out)
+
+        print(in_out)
+
+        for ind, (dim_in, dim_out) in enumerate(in_out):
+            is_last = ind >= (num_resolutions - 1)
+
+            block_modules = (
+                ResidualTemporalBlock(
+                    dim_in,
+                    dim_out,
+                    kernel_size=5,
+                    embed_dim=self.time_dim,
+                    horizon=horizon_curr,
+                ),
+                ResidualTemporalBlock(
+                    dim_out,
+                    dim_out,
+                    kernel_size=5,
+                    embed_dim=self.time_dim,
+                    horizon=horizon_curr,
+                ),
+                Downsample1d(dim_out),
+            )
+            self.blocks.append(block_modules)
+
+            if not is_last:
+                horizon_curr = horizon_curr // 2
+
+        mid_dim = dims[-1]
+        mid_dim_2 = mid_dim // 2
+        mid_dim_3 = mid_dim // 4
+
+        self.mid_block1 = ResidualTemporalBlock(
+            mid_dim,
+            mid_dim_2,
+            kernel_size=5,
+            embed_dim=self.time_dim,
+            horizon=horizon_curr,
+        )
+        self.mid_down1 = Downsample1d(mid_dim_2)
+        horizon_curr = horizon_curr // 2
+
+        self.mid_block2 = ResidualTemporalBlock(
+            mid_dim_2,
+            mid_dim_3,
+            kernel_size=5,
+            embed_dim=self.time_dim,
+            horizon=horizon_curr,
+        )
+        self.mid_down2 = Downsample1d(mid_dim_3)
+        horizon_curr = horizon_curr // 2
+        ##
+        fc_dim = mid_dim_3 * max(horizon_curr, 1)
+
+        # PyTorch의 nn.Sequential을 Flax의 개별 레이어로 정의
+        # 입력 차원은 flatten된 x(fc_dim)와 t(self.time_dim)가 합쳐진 것
+        self.final_layer1 = nn.Dense(fc_dim // 2)
+        self.final_layer2 = nn.Dense(self.out_dim)
+
+    def __call__(self, x, cond, time, *args):
+        # (PyTorch forward 로직 시작)
+
+        # (B, L, C) -> (B, C, L)
+        # PyTorch의 nn.Conv1d 로직을 1:1 포팅하기 위해 축을 변경합니다.
+        x = einops.rearrange(x, "b h t -> b t h")
+
+        # Time MLP 실행
+        t = self.time_mlp(time)
+
+        # Downsampling Blocks 실행
+        for resnet, resnet2, downsample in self.blocks:
+            x = resnet(x, t)
+            x = resnet2(x, t)
+            x = downsample(x)
+
+        # Mid Blocks 실행
+        x = self.mid_block1(x, t)
+        x = self.mid_down1(x)
+        ##
+        x = self.mid_block2(x, t)
+        x = self.mid_down2(x)
+        # Flatten
+        x = x.reshape((x.shape[0], -1))
+
+        # (PyTorch forward의 torch.cat 부분)
+        x_t = jnp.concatenate([x, t], axis=-1)
+
+        # Final MLP 실행
+        # (PyTorch forward의 self.final_block(torch.cat(...)) 부분)
+        x = self.final_layer1(x_t)
+        x = jax.nn.mish(x)
+        out = self.final_layer2(x)
+
+        return out
