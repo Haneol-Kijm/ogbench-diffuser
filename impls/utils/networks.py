@@ -553,7 +553,7 @@ class GCIQEValue(nn.Module):
             return v
 
 
-from typing import Callable
+from typing import Callable, List
 
 import einops
 
@@ -1061,6 +1061,16 @@ class ValueFunction(nn.Module):
     dim: int = 32
     dim_mults: Sequence[int] = (1, 2, 4, 8)
     out_dim: int = 1
+
+    time_dim: int = None
+    time_mlp: Callable = None
+    blocks: List = None
+    mid_block1: Callable = None
+    mid_down1: Callable = None
+    mid_block2: Callable = None
+    mid_down2: Callable = None
+    final_layer1: Callable = None
+    final_layer2: Callable = None
 
     def setup(self):
         horizon_curr = self.horizon
