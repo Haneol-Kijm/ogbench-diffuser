@@ -457,3 +457,201 @@ class HGCDataset(GCDataset):
                 )
 
         return batch
+
+
+import dataclasses
+from collections import namedtuple
+from typing import Any
+
+import numpy as np
+
+from impls.utils.normalization import DatasetNormalizer
+
+# (다른 필요한 import ... )
+
+# diffuser/datasets/sequence.py (lines 13-14)에서 가져옴
+Batch = namedtuple("Batch", "trajectories conditions")
+ValueBatch = namedtuple("ValueBatch", "trajectories conditions values")
+
+
+@dataclasses.dataclass
+class DiffuserSequenceDataset:
+    """
+    [Task 2] jannerm/diffuser의 SequenceDataset 로직을 포팅한 부모 클래스.
+    ogbench의 sample(batch_size) 인터페이스를 따름.
+    """
+
+    dataset: Dataset  # ogbench/main.py가 생성한 Dataset 객체
+    config: Any
+
+    def __post_init__(self):
+        # 1. diffuser/datasets/sequence.py의 __init__ 로직
+        self.fields = self.dataset._dict  # 원본 numpy 배열 딕셔너리
+        self.horizon = self.config["horizon"]
+        self.max_path_length = self.config["max_path_length"]
+        self.use_padding = self.config.get("use_padding", True)
+
+        # 2. ogbench('terminals') -> diffuser('path_lengths') 변환
+        if "path_lengths" not in self.fields:
+            self.fields["path_lengths"] = self._compute_path_lengths_from_terminals(
+                self.fields["terminals"]
+            )
+
+        # 3. Normalizer 초기화
+        self.normalizer = DatasetNormalizer(
+            self.fields,
+            self.config["normalizer"],  # config에서 normalizer 문자열을 읽어옴
+            path_lengths=self.fields["path_lengths"],
+        )
+
+        # 4. 데이터 정규화
+        self.n_episodes = len(self.fields["path_lengths"])
+        obs_shape = self.fields["observations"].shape
+        act_shape = self.fields["actions"].shape
+
+        flat_observations = self.fields["observations"].reshape(
+            self.n_episodes * self.max_path_length, -1
+        )
+        flat_actions = self.fields["actions"].reshape(
+            self.n_episodes * self.max_path_length, -1
+        )
+
+        normed_flat_obs = self.normalizer(flat_observations, "observations")
+        normed_flat_act = self.normalizer(flat_actions, "actions")
+
+        self.normed_observations = normed_flat_obs.reshape(obs_shape)
+        self.normed_actions = normed_flat_act.reshape(act_shape)
+
+        # TODO (Refactor): 원본 diffuser 구현(원본/정규화 데이터 이중 저장)을 1:1로
+        # 재현하기 위해 self.normed_... 속성을 새로 추가함. (192GB RAM 환경)
+        # 추후 ogbench GCDataset처럼 'replace' 방식으로 리팩토링 고려.
+
+        # 5. 샘플링 인덱스 생성
+        self.indices = self.make_indices(self.fields["path_lengths"], self.horizon)
+
+        # 6. Dims 저장
+        self.observation_dim = self.fields["observations"].shape[-1]
+        self.action_dim = self.fields["actions"].shape[-1]
+
+    def _compute_path_lengths_from_terminals(self, terminals):
+        """
+        ogbench의 'terminals' (bool 배열)로부터
+        diffuser의 'path_lengths' (int 배열)를 생성합니다.
+        """
+        path_lengths = []
+        start_idx = 0
+        terminal_indices = np.where(terminals)[0]
+
+        for end_idx in terminal_indices:
+            length = end_idx - start_idx + 1
+            path_lengths.append(length)
+            start_idx = end_idx + 1
+
+        return np.array(path_lengths)
+
+    def make_indices(self, path_lengths, horizon):
+        """
+        diffuser/datasets/sequence.py (lines 48-59)
+        """
+        indices = []
+        for i, path_length in enumerate(path_lengths):
+            max_start = min(path_length - 1, self.max_path_length - horizon)
+            if not self.use_padding:
+                max_start = min(max_start, path_length - horizon)
+            for start in range(max_start):
+                end = start + horizon
+                indices.append((i, start, end))
+        indices = np.array(indices)
+        return indices
+
+    def _get_batch_from_indices(self, batch_indices):
+        """
+        [핵심 헬퍼 함수]
+        상속을 위해 `sample` 로직 중 실제 데이터 슬라이싱 부분을 분리합니다.
+        diffuser의 SequenceDataset.__getitem__ 로직을 배치 처리합니다.
+
+        """
+        trajectories_list = []
+        conditions_list_0 = []  # t=0 시점의 observation만 저장
+
+        for path_ind, start, end in batch_indices:
+            # 2a. 정규화된 궤적 슬라이싱
+            observations = self.normed_observations[path_ind, start:end]
+            actions = self.normed_actions[path_ind, start:end]
+
+            # 2b. 궤적 생성 (action, observation 순서 중요)
+            trajectories = np.concatenate([actions, observations], axis=-1)
+
+            # 2c. 컨디션 생성 (diffuser 모델은 t=0 observation만 사용)
+            conditions_0 = observations[0]
+
+            trajectories_list.append(trajectories)
+            conditions_list_0.append(conditions_0)
+
+        # 4. 리스트를 numpy 배치로 스택
+        batch_trajectories = np.stack(trajectories_list)
+        batch_conditions = {0: np.stack(conditions_list_0)}
+
+        return {
+            "trajectories": batch_trajectories,  # (B, H, A+O)
+            "conditions": batch_conditions,  # {0: (B, O)}
+        }
+
+    def sample(self, batch_size: int):
+        """
+        ogbench/main.py가 호출할 DiffuserSequenceDataset의 샘플링 함수.
+        """
+        # 1. 배치 크기만큼 랜덤 인덱스 샘플링
+        rand_indices = np.random.randint(len(self.indices), size=batch_size)
+        batch_indices = self.indices[rand_indices]  # (path_ind, start, end)의 배치
+
+        # 2. 헬퍼 함수를 호출하여 딕셔너리 반환
+        return self._get_batch_from_indices(batch_indices)
+
+
+@dataclasses.dataclass
+class DiffuserValueDataset(DiffuserSequenceDataset):
+    """
+    [Task 2] jannerm/diffuser의 ValueDataset 로직을 포팅한 자식 클래스.
+    부모의 초기화/샘플링 로직을 재사용하고 'values' 계산만 추가함.
+    """
+
+    def __post_init__(self):
+        # 1. 부모의 __post_init__을 먼저 호출 (정규화, 인덱싱 등 수행)
+        super().__post_init__()
+
+        # 2. ValueDataset 고유의 로직만 추가
+        #
+        self.discount = self.config["discount"]
+        self.discounts = self.discount ** np.arange(self.max_path_length)[:, None]
+
+    def sample(self, batch_size: int):
+        """
+        ogbench/main.py가 호출할 DiffuserValueDataset의 샘플링 함수.
+        diffuser의 ValueDataset.__getitem__ 로직을 재현.
+
+        """
+        # 1. 배치 크기만큼 랜덤 인덱스 샘플링
+        rand_indices = np.random.randint(len(self.indices), size=batch_size)
+        batch_indices = self.indices[rand_indices]  # (path_ind, start, end)의 배치
+
+        # 2. 부모의 헬퍼 함수를 호출해 (trajectories, conditions) 딕셔너리를 가져옴
+        batch_dict = self._get_batch_from_indices(batch_indices)
+
+        # 3. ValueDataset 고유의 'values' 계산 로직 추가
+        values_list = []
+        for path_ind, start, end in batch_indices:
+            # 3a. 원본(unnormalized) 보상 슬라이싱
+            rewards = self.fields["rewards"][path_ind, start:]
+
+            # 3b. 할인 계수 슬라이싱
+            discounts = self.discounts[: len(rewards)]
+
+            # 3c. 가치(미래 보상 합) 계산
+            value = (discounts * rewards).sum().astype(np.float32)
+            values_list.append(value)
+
+        # 4. 딕셔너리에 'values' 키를 추가하여 반환
+        batch_dict["values"] = np.stack(values_list)  # (B,)
+
+        return batch_dict
