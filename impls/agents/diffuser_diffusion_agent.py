@@ -206,12 +206,12 @@ class DiffuserDiffusionAgent(flax.struct.PyTreeNode):
         )
 
         # 3. Unet(학습 대상) TrainState 생성 (GCBC 스타일)
-        dummy_x = ex_observations
-        dummy_cond = {0: ex_observations[:, 0, action_dim:]}  # (B, O)
-        dummy_t = jnp.ones((ex_observations.shape[0],), dtype=jnp.int32)
+        ex_x = ex_observations
+        ex_cond = {0: ex_observations[:, 0, action_dim:]}  # (B, O)
+        ex_t = jnp.ones((ex_observations.shape[0],), dtype=jnp.int32)
 
         network_info = dict(
-            unet=(unet_def, (dummy_x, dummy_cond, dummy_t)),
+            unet=(unet_def, (ex_x, ex_cond, ex_t)),
         )
         networks = {k: v[0] for k, v in network_info.items()}
         network_args = {k: v[1] for k, v in network_info.items()}
@@ -226,11 +226,23 @@ class DiffuserDiffusionAgent(flax.struct.PyTreeNode):
             raise ValueError("Config must provide 'value_checkpoint_path'")
 
         # 4a. ValueFunction의 TrainState 뼈대 생성 (복원용)
-        value_network_def = ModuleDict({"value": value_def})
-        dummy_value_params = value_network_def.init(value_rng, **network_args)["params"]
+        value_network_info = dict(
+            value=(value_def, (ex_x, ex_cond, ex_t)),
+        )
+        value_networks = {
+            k: v[0] for k, v in value_network_info.items()
+        }  # {'value': value_def}
+        value_init_args = {
+            k: v[1] for k, v in value_network_info.items()
+        }  # {'value': (...)}
+
+        value_network_def = ModuleDict(value_networks)
+        value_network_params = value_network_def.init(value_rng, **value_init_args)[
+            "params"
+        ]
         dummy_value_state = TrainState.create(
             value_network_def,
-            dummy_value_params,
+            value_network_params,
             tx=network_tx,  # tx는 아무거나 상관 없음
         )
 
@@ -245,7 +257,7 @@ class DiffuserDiffusionAgent(flax.struct.PyTreeNode):
         value_network = restored_value_state.replace(tx=None)  # 옵티마이저 제거
 
         # 5. 확산 버퍼 및 손실 가중치 로드
-        buffers = diffuser_utils.get_diffuser_buffers(config["n_diffusion_steps"])
+        buffers = get_diffuser_buffers(config["n_diffusion_steps"])
 
         # diffuser.get_loss_weights 로직
         #
