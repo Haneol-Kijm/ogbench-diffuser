@@ -110,12 +110,10 @@ class DiffuserDiffusionAgent(flax.struct.PyTreeNode):
         loss, info = self.diffusion_loss(batch, grad_params, loss_rng)
         return loss, info
 
-    # --- 2. Update (ogbench 스타일) ---
     @jax.jit
     def update(self, batch: Dict[str, Any]):
         """
         gcbc.py의 apply_loss_fn 방식을 따름
-
         """
         new_rng, rng = jax.random.split(self.rng)
 
@@ -126,13 +124,9 @@ class DiffuserDiffusionAgent(flax.struct.PyTreeNode):
 
         return self.replace(network=new_network, rng=new_rng), info
 
-    # --- 3. Sample Actions (ogbench 스타일) ---
     @jax.jit
     def sample_actions(self, observations, goals, seed):
-        """
-        [Task 3b] 가이드 샘플링(추론) 실행
-        ogbench/utils/evaluation.py가 호출함
-        """
+        """가이드 샘플링(추론) 실행. ogbench/utils/evaluation.py가 호출함"""
         rng = jax.random.PRNGKey(seed)
 
         # 1. 입력 변환 (ogbench -> diffuser)
@@ -171,6 +165,14 @@ class DiffuserDiffusionAgent(flax.struct.PyTreeNode):
     # --- 4. Create (ogbench 스타일) ---
     @classmethod
     def create(cls, seed, ex_observations, ex_actions, config):
+        """Create a new agent.
+
+        Args:
+            seed: Random seed.
+            ex_observations: Example batch of observations.
+            ex_actions: Example batch of actions. In discrete-action MDPs, this should contain the maximum action value.
+            config: Configuration dictionary.
+        """
         rng = jax.random.PRNGKey(seed)
         rng, unet_rng, value_rng = jax.random.split(rng, 3)
 
@@ -235,7 +237,9 @@ class DiffuserDiffusionAgent(flax.struct.PyTreeNode):
         # 4b. 가중치 복원
         print(f"Loading ValueFunction from: {config['value_checkpoint_path']}")
         restored_value_state = restore_agent(
-            dummy_value_state, config["value_checkpoint_path"]
+            dummy_value_state,
+            config["value_checkpoint_path"],
+            config["value_checkpoint_epoch"],
         )
         # 동결된 파라미터와 apply_fn을 value_network로 묶음
         value_network = restored_value_state.replace(tx=None)  # 옵티마이저 제거
@@ -291,6 +295,7 @@ def get_config():
             dim_value=32,
             dim_mults_value=(1, 2, 4, 8),
             value_checkpoint_path=ml_collections.config_dict.placeholder(str),
+            value_checkpoint_epoch=ml_collections.config_dict.placeholder(int),
             # Diffusion (GaussianDiffusion)
             n_diffusion_steps=20,
             action_weight=10,
