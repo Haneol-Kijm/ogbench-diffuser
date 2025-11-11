@@ -42,7 +42,7 @@ class DiffuserDiffusionAgent(flax.struct.PyTreeNode):
     loss_weights: Any = nonpytree_field()  # (B, H, O+A)
 
     # --- [수정] Loss 함수를 클래스 메소드로 정의 ---
-    def _diffusion_loss_fn(self, grad_params, batch, rng_key):
+    def diffusion_loss(self, batch, grad_params, rng_key):
         """
         Task 3a의 diffuser_utils.diffusion_loss_fn을 메소드로 구현.
         diffuser/models/diffusion.py의 p_losses 로직
@@ -107,7 +107,7 @@ class DiffuserDiffusionAgent(flax.struct.PyTreeNode):
 
         rng, loss_rng = jax.random.split(rng)
 
-        loss, info = self._diffusion_loss_fn(params, batch, loss_rng)
+        loss, info = self.diffusion_loss(batch, grad_params, loss_rng)
         return loss, info
 
     # --- 2. Update (ogbench 스타일) ---
@@ -120,12 +120,11 @@ class DiffuserDiffusionAgent(flax.struct.PyTreeNode):
         new_rng, rng = jax.random.split(self.rng)
 
         def loss_fn(grad_params):
-            loss, info = self.total_loss(batch=batch, grad_params=grad_params, rng=rng)
-            return loss, info
+            return self.total_loss(batch, grad_params, rng=rng)
 
         new_network, info = self.network.apply_loss_fn(loss_fn=loss_fn)
 
-        return self.replace(rng=new_rng, network=new_network), info
+        return self.replace(network=new_network, rng=new_rng), info
 
     # --- 3. Sample Actions (ogbench 스타일) ---
     @jax.jit
@@ -133,7 +132,6 @@ class DiffuserDiffusionAgent(flax.struct.PyTreeNode):
         """
         [Task 3b] 가이드 샘플링(추론) 실행
         ogbench/utils/evaluation.py가 호출함
-
         """
         rng = jax.random.PRNGKey(seed)
 
