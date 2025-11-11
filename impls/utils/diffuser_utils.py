@@ -212,6 +212,7 @@ def p_mean_variance(
         "predict_epsilon",
         "clip_denoised",
         "guidance_scale",
+        "t_stopgrad",
     ),
 )
 def sample_loop_with_guidance(
@@ -226,6 +227,7 @@ def sample_loop_with_guidance(
     action_dim: int,
     n_timesteps: int,
     guidance_scale: float,
+    t_stopgrad: int,
     predict_epsilon: bool = False,
     clip_denoised: bool = True,
 ):
@@ -238,11 +240,15 @@ def sample_loop_with_guidance(
     """
 
     # 1. 가이던스 그래디언트 함수 정의
-    @jax.grad
-    def value_grad_fn(v_params, x_t, cond, t):
-        # ValueFunction은 (x, cond, t)를 받음
+    # 1a. (원본) 값을 반환하는 함수를 먼저 정의
+    def value_fn_body(v_params, x_t, cond, t):
         value_pred = value_apply_fn(v_params, x_t, cond, t)
-        return value_pred.sum()  # (B,) -> (1,)
+        return value_pred.sum()
+
+    # 1b. [수정된 부분] "함수 공장"을 명시적으로 호출
+    #    value_fn_body의 1번 인자(x_t)에 대해 미분하는
+    #    새로운 함수 'value_grad_fn'을 생성합니다.
+    value_grad_fn = jax.grad(value_fn_body, argnums=1)
 
     # 2. lax.scan에 사용할 루프 본체(body) 함수
     def loop_body(carry, t_idx):
@@ -251,7 +257,7 @@ def sample_loop_with_guidance(
 
         # JAX는 배치를 지원하므로 (B,) 크기의 t 벡터 생성
         batch_size = x.shape[0]
-        t = jnp.full((batch_size,), t_idx, dtype=jnp.int32)
+        t = jnp.full((batch_size,), t_idx, dtype=jnp.int32)  # make_timesteps
 
         # 1. 기본 p_mean_variance 계산
         model_mean, model_variance, model_log_variance = p_mean_variance(
@@ -268,6 +274,10 @@ def sample_loop_with_guidance(
         # 2. 가이던스 적용 (lax.scan 내부에서 jax.grad 호출)
         # plan_guided.py의 핵심 로직
         grad = value_grad_fn(value_params, x, cond, t)
+
+        stopgrad_mask = (t < t_stopgrad)[:, None, None]
+        grad = jnp.where(stopgrad_mask, 0.0, grad)
+
         model_mean = model_mean + guidance_scale * model_variance * grad
 
         # 3. 샘플링 (x_{t-1} 계산)
