@@ -1048,13 +1048,12 @@ class ValueFunction(nn.Module):
         dims = [self.transition_dim, *map(lambda m: self.dim * m, self.dim_mults)]
         in_out = list(zip(dims[:-1], dims[1:]))
 
-        self.time_dim = self.dim
         self.time_mlp = nn.Sequential(
             [
-                SinusoidalPosEmb(self.time_dim),
-                nn.Dense(self.time_dim * 4),
+                SinusoidalPosEmb(self.dim),
+                nn.Dense(self.dim * 4),
                 jax.nn.mish,
-                nn.Dense(self.time_dim),
+                nn.Dense(self.dim),
             ]
         )
 
@@ -1071,14 +1070,14 @@ class ValueFunction(nn.Module):
                     dim_in,
                     dim_out,
                     kernel_size=5,
-                    embed_dim=self.time_dim,
+                    embed_dim=self.dim,
                     horizon=horizon_curr,
                 ),
                 ResidualTemporalBlock(
                     dim_out,
                     dim_out,
                     kernel_size=5,
-                    embed_dim=self.time_dim,
+                    embed_dim=self.dim,
                     horizon=horizon_curr,
                 ),
                 Downsample1d(dim_out),
@@ -1098,7 +1097,7 @@ class ValueFunction(nn.Module):
             mid_dim,
             mid_dim_2,
             kernel_size=5,
-            embed_dim=self.time_dim,
+            embed_dim=self.dim,
             horizon=horizon_curr,
         )
         self.mid_down1 = Downsample1d(mid_dim_2)
@@ -1108,7 +1107,7 @@ class ValueFunction(nn.Module):
             mid_dim_2,
             mid_dim_3,
             kernel_size=5,
-            embed_dim=self.time_dim,
+            embed_dim=self.dim,
             horizon=horizon_curr,
         )
         self.mid_down2 = Downsample1d(mid_dim_3)
