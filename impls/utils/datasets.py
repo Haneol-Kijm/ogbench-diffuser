@@ -687,4 +687,13 @@ class DiffuserValueDataset(DiffuserSequenceDataset):
         # 4. 딕셔너리에 'values' 키를 추가하여 반환
         batch_dict["values"] = np.stack(values_list)  # (B,)
 
+        # --- 🔻 [수정] main.py 호환성을 위해 키 추가 🔻 ---
+        # Diffuser 에이전트의 create는 ex_observations로 (B, H, A+O) 궤적을 사용
+        batch_dict["observations"] = batch_dict["trajectories"]
+
+        # ex_actions로 (B, H, A) 액션 부분을 사용
+        # (self.action_dim은 부모 클래스의 __post_init__에서 설정됨)
+        batch_dict["actions"] = batch_dict["trajectories"][:, :, : self.action_dim]
+        # --- 🔺 [수정 완료] 🔺 ---
+
         return batch_dict
