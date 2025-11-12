@@ -596,9 +596,9 @@ class Downsample1d(nn.Module):
         x_transposed = jnp.transpose(x, (0, 2, 1))
 
         # nn.Conv(stride=2)
-        out = nn.Conv(
-            features=self.dim, kernel_size=(3,), strides=(2,), padding="SAME"
-        )(x_transposed)
+        out = nn.Conv(features=self.dim, kernel_size=(3,), strides=(2,), padding=1)(
+            x_transposed
+        )
 
         # (B, L', C) -> (B, C, L')
         return jnp.transpose(out, (0, 2, 1))
@@ -906,14 +906,14 @@ class TemporalUnet(nn.Module):
         self.time_mlp = nn.Sequential(
             [
                 SinusoidalPosEmb(self.dim),
-                nn.Linear(self.dim * 4),
-                nn.mish,
-                nn.Linear(self.dim),
+                nn.Dense(self.dim * 4),
+                jax.nn.mish,
+                nn.Dense(self.dim),
             ]
         )
 
-        self.downs = []
-        self.ups = []
+        downs = []
+        ups = []
         num_resolutions = len(in_out)
         print(in_out)
 
@@ -922,7 +922,7 @@ class TemporalUnet(nn.Module):
         for ind, (dim_in, dim_out) in enumerate(in_out):
             is_last = ind >= (num_resolutions - 1)
 
-            self.downs.append(
+            downs.append(
                 [
                     ResidualTemporalBlock(
                         dim_in, dim_out, embed_dim=time_dim, horizon=current_horizon
@@ -942,6 +942,8 @@ class TemporalUnet(nn.Module):
             if not is_last:
                 current_horizon = current_horizon // 2
 
+        self.downs = tuple(downs)
+
         mid_dim = dims[-1]
         self.mid_block1 = ResidualTemporalBlock(
             mid_dim, mid_dim, embed_dim=time_dim, horizon=current_horizon
@@ -958,7 +960,7 @@ class TemporalUnet(nn.Module):
         for ind, (dim_in, dim_out) in enumerate(reversed(in_out[1:])):
             is_last = ind >= (num_resolutions - 1)
 
-            self.ups.append(
+            ups.append(
                 [
                     ResidualTemporalBlock(
                         dim_out * 2, dim_in, embed_dim=time_dim, horizon=current_horizon
@@ -977,6 +979,8 @@ class TemporalUnet(nn.Module):
 
             if not is_last:
                 current_horizon = current_horizon * 2
+
+        self.ups = tuple(ups)
 
         self.final_conv = nn.Sequential(
             [
