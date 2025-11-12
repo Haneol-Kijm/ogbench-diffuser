@@ -744,8 +744,6 @@ class PreNorm(nn.Module):
     dim: int
     fn: Callable
 
-    norm: Callable = None  # setup에서 정의
-
     def setup(self):
         self.norm = LayerNorm(self.dim)  # 커스텀 LayerNorm 사용
 
@@ -764,11 +762,6 @@ class LinearAttention(nn.Module):
     dim: int
     heads: int = 4
     dim_head: int = 32
-
-    scale: float = None
-    hidden_dim: int = None
-    to_qkv: Callable = None
-    to_out: Callable = None
 
     def setup(self):
         """
@@ -845,10 +838,6 @@ class ResidualTemporalBlock(nn.Module):
     horizon: int
     kernel_size: int = 5
 
-    blocks: Sequence[Callable] = None
-    time_mlp: Callable = None
-    residual_conv: Callable = None
-
     def setup(self):
         # PyTorch의 nn.ModuleList
         self.blocks = [
@@ -907,15 +896,6 @@ class TemporalUnet(nn.Module):
     dim: int = 32
     dim_mults: Sequence[int] = (1, 2, 4, 8)
     attention: bool = False
-
-    # Flax에서 모듈 리스트는 setup에서 동적으로 생성
-    time_mlp: Callable = None
-    downs: Sequence = None
-    ups: Sequence = None
-    mid_block1: Callable = None
-    mid_attn: Callable = None
-    mid_block2: Callable = None
-    final_conv: Callable = None
 
     def setup(self):
         dims = [self.transition_dim, *map(lambda m: self.dim * m, self.dim_mults)]
@@ -1061,16 +1041,6 @@ class ValueFunction(nn.Module):
     dim: int = 32
     dim_mults: Sequence[int] = (1, 2, 4, 8)
     out_dim: int = 1
-
-    time_dim: int = None
-    time_mlp: Callable = None
-    blocks: List = None
-    mid_block1: Callable = None
-    mid_down1: Callable = None
-    mid_block2: Callable = None
-    mid_down2: Callable = None
-    final_layer1: Callable = None
-    final_layer2: Callable = None
 
     def setup(self):
         horizon_curr = self.horizon
