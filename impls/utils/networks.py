@@ -849,7 +849,7 @@ class ResidualTemporalBlock(nn.Module):
         self.time_mlp = nn.Sequential(
             [
                 jax.nn.mish,
-                nn.Dense(self.embed_dim),
+                nn.Dense(self.out_channels),
                 lambda x: x[:, :, None],
             ]
         )
