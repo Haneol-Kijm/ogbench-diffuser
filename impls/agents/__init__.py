@@ -16,6 +16,6 @@ agents = dict(
     hiql=HIQLAgent,
     qrl=QRLAgent,
     sac=SACAgent,
-    diffuset_value=DiffuserValueAgent,
+    diffuser_value=DiffuserValueAgent,
     diffuser_diffusion=DiffuserDiffusionAgent,
 )
