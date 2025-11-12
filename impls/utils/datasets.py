@@ -635,7 +635,14 @@ class DiffuserSequenceDataset:
         batch_indices = self.indices[rand_indices]  # (path_ind, start, end)의 배치
 
         # 2. 헬퍼 함수를 호출하여 딕셔너리 반환
-        return self._get_batch_from_indices(batch_indices)
+        batch_dict = self._get_batch_from_indices(batch_indices)
+
+        # --- 🔻 [수정] main.py 호환성을 위해 키 추가 🔻 ---
+        batch_dict["observations"] = batch_dict["trajectories"]
+        batch_dict["actions"] = batch_dict["trajectories"][:, :, : self.action_dim]
+        # --- 🔺 [수정 완료] 🔺 ---
+
+        return batch_dict
 
 
 @dataclasses.dataclass
