@@ -63,8 +63,8 @@ class DiffuserValueAgent(flax.struct.PyTreeNode):
         )
 
         # 3. ValueFunction 예측
-        pred_values = self.network.apply_fn(  # self.state에서 참조
-            grad_params, x_noisy, batch["conditions"], t
+        pred_values = self.network.select("value")(  # self.state에서 참조
+            x_noisy, batch["conditions"], t, params=grad_params
         ).squeeze(
             -1
         )  # (B, 1) -> (B,)
@@ -115,18 +115,18 @@ class DiffuserValueAgent(flax.struct.PyTreeNode):
 
         new_network, info = self.network.apply_loss_fn(loss_fn=loss_fn)
 
-        return self.replace(state=new_network, rng=new_rng), info
+        return self.replace(network=new_network, rng=new_rng), info
 
     # --- 3. Sample Actions (ogbench 스타일) ---
     @jax.jit
-    def sample_actions(self, observations, goals, seed):
+    def sample_actions(self, observations, goals, seed, temperature=1.0):
         """
         이 에이전트는 추론(planning) 기능이 없습니다.
         ogbench/main.py의 평가 루프가 실패하지 않도록
         더미(dummy) 액션을 반환합니다.
         """
         batch_size = observations.shape[0]
-        dummy_actions = jnp.zeros((batch_size, self.config["action_dim"]))
+        dummy_actions = jnp.zeros((self.config["action_dim"],))
         return dummy_actions
 
     # --- 4. Create (ogbench 스타일) ---
