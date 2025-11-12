@@ -474,52 +474,93 @@ class DiffuserSequenceDataset:
 
     def __post_init__(self):
         # 1. diffuser/datasets/sequence.py의 __init__ 로직
-        self.fields = self.dataset._dict  # 원본 numpy 배열 딕셔너리
+        self.fields = self.dataset._dict  # 원본 numpy 배열 딕셔너리 (평평한 상태)
         self.horizon = self.config["horizon"]
         self.max_path_length = self.config["max_path_length"]
         self.use_padding = self.config.get("use_padding", True)
 
         # 2. ogbench('terminals') -> diffuser('path_lengths') 변환
         if "path_lengths" not in self.fields:
-            self.fields["path_lengths"] = self._compute_path_lengths_from_terminals(
+            path_lengths = self._compute_path_lengths_from_terminals(
                 self.fields["terminals"]
             )
+            # path_lengths를 self.fields에 저장 (Normalizer가 사용)
+            self.fields["path_lengths"] = path_lengths
+        else:
+            path_lengths = self.fields["path_lengths"]
 
-        # 3. Normalizer 초기화
+        self.n_episodes = len(path_lengths)
+        obs_dim = self.fields["observations"].shape[-1]
+        act_dim = self.fields["actions"].shape[-1]
+
+        # --- [수정 시작] 원본 diffuser의 ReplayBuffer 로직을 여기에 구현 ---
+
+        # 3. (N_episodes, max_path_length, dim) 모양의 빈 텐서 생성
+        # (jannerm/diffuser/datasets/buffer.py ReplayBuffer.__init__)
+        self.fields_reshaped = {}  # 재구성된 데이터를 저장할 새 딕셔너리
+        self.fields_reshaped["observations"] = np.zeros(
+            (self.n_episodes, self.max_path_length, obs_dim), dtype=np.float32
+        )
+        self.fields_reshaped["actions"] = np.zeros(
+            (self.n_episodes, self.max_path_length, act_dim), dtype=np.float32
+        )
+        self.fields_reshaped["rewards"] = np.zeros(
+            (self.n_episodes, self.max_path_length, 1), dtype=np.float32
+        )
+
+        # 4. 평평한(flat) 데이터를 2D 텐서로 복사
+        # (jannerm/diffuser/datasets/buffer.py ReplayBuffer.add_path)
+        current_idx = 0
+        for i, length in enumerate(path_lengths):
+            # 원본 diffuser의 'assert' 로직 (jannerm/diffuser/datasets/buffer.py L103)
+            assert (
+                int(length) <= self.max_path_length
+            ), f"Episode {i} length {int(length)} exceeds max_path_length {self.max_path_length}"
+
+            # (jannerm/diffuser/datasets/buffer.py L109)
+            int_length = int(length)
+            self.fields_reshaped["observations"][i, :int_length] = self.fields[
+                "observations"
+            ][current_idx : current_idx + int_length]
+            self.fields_reshaped["actions"][i, :int_length] = self.fields["actions"][
+                current_idx : current_idx + int_length
+            ]
+            self.fields_reshaped["rewards"][i, :int_length] = self.fields["rewards"][
+                current_idx : current_idx + int_length
+            ][
+                :, None
+            ]  # (L, 1) 형태로
+
+            current_idx += int_length
+
+        # 5. Normalizer 초기화 (재구성된 데이터로!)
+        # (jannerm/diffuser/datasets/sequence.py L34)
         self.normalizer = DatasetNormalizer(
-            self.fields,
-            self.config["normalizer"],  # config에서 normalizer 문자열을 읽어옴
-            path_lengths=self.fields["path_lengths"],
+            self.fields_reshaped,  # <--- 'self.fields' (평평한) 대신 'self.fields_reshaped' (2D) 사용
+            self.config["normalizer"],
+            path_lengths=path_lengths,
         )
 
-        # 4. 데이터 정규화
-        self.n_episodes = len(self.fields["path_lengths"])
-        obs_shape = self.fields["observations"].shape
-        act_shape = self.fields["actions"].shape
-
-        flat_observations = self.fields["observations"].reshape(
-            self.n_episodes * self.max_path_length, -1
+        # 6. 데이터 정규화 (jannerm/diffuser/datasets/sequence.py L41)
+        # Normalizer가 2D 텐서를 받아 정규화된 2D 텐서를 반환
+        self.normed_observations = self.normalizer(
+            self.fields_reshaped["observations"], "observations"
         )
-        flat_actions = self.fields["actions"].reshape(
-            self.n_episodes * self.max_path_length, -1
+        self.normed_actions = self.normalizer(
+            self.fields_reshaped["actions"], "actions"
         )
 
-        normed_flat_obs = self.normalizer(flat_observations, "observations")
-        normed_flat_act = self.normalizer(flat_actions, "actions")
+        # (ValueDataset에서 사용할 정규화되지 *않은* 2D 보상)
+        self.fields["rewards_reshaped"] = self.fields_reshaped["rewards"]
 
-        self.normed_observations = normed_flat_obs.reshape(obs_shape)
-        self.normed_actions = normed_flat_act.reshape(act_shape)
+        # --- [수정 완료] ---
 
-        # TODO (Refactor): 원본 diffuser 구현(원본/정규화 데이터 이중 저장)을 1:1로
-        # 재현하기 위해 self.normed_... 속성을 새로 추가함. (192GB RAM 환경)
-        # 추후 ogbench GCDataset처럼 'replace' 방식으로 리팩토링 고려.
+        # 7. 샘플링 인덱스 생성 (jannerm/diffuser/datasets/sequence.py L35)
+        self.indices = self.make_indices(path_lengths, self.horizon)
 
-        # 5. 샘플링 인덱스 생성
-        self.indices = self.make_indices(self.fields["path_lengths"], self.horizon)
-
-        # 6. Dims 저장
-        self.observation_dim = self.fields["observations"].shape[-1]
-        self.action_dim = self.fields["actions"].shape[-1]
+        # 8. Dims 저장 (jannerm/diffuser/datasets/sequence.py L37-38)
+        self.observation_dim = obs_dim
+        self.action_dim = act_dim
 
     def _compute_path_lengths_from_terminals(self, terminals):
         """
@@ -628,9 +669,13 @@ class DiffuserValueDataset(DiffuserSequenceDataset):
 
         # 3. ValueDataset 고유의 'values' 계산 로직 추가
         values_list = []
+
+        rewards_reshaped = self.fields["rewards_reshaped"]
+
         for path_ind, start, end in batch_indices:
             # 3a. 원본(unnormalized) 보상 슬라이싱
-            rewards = self.fields["rewards"][path_ind, start:]
+            rewards = rewards_reshaped[path_ind, start:]  # (L, 1)
+            rewards = rewards.squeeze()  # (L, )
 
             # 3b. 할인 계수 슬라이싱
             discounts = self.discounts[: len(rewards)]
