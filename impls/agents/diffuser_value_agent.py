@@ -8,17 +8,13 @@ import ml_collections
 import optax
 
 # Task 3에서 포팅한 유틸리티
-from impls.utils.diffuser_utils import (
-    apply_conditioning,
-    get_diffuser_buffers,
-    q_sample,
-)
+from utils.diffuser_utils import apply_conditioning, get_diffuser_buffers, q_sample
 
 # ogbench 유틸리티
-from impls.utils.flax_utils import ModuleDict, TrainState, nonpytree_field
+from utils.flax_utils import ModuleDict, TrainState, nonpytree_field
 
 # Task 1에서 포팅한 모델
-from impls.utils.networks import ValueFunction
+from utils.networks import ValueFunction
 
 # --- 내부 손실 함수 (Task 3 로직을 에이전트 내부로 이동) ---
 # diffuser/models/helpers.py의 ValueLoss 로직

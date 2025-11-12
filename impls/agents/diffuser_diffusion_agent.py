@@ -8,7 +8,7 @@ import ml_collections
 import optax
 
 # Task 3에서 포팅한 유틸리티
-from impls.utils.diffuser_utils import (  # Task 3b의 핵심 추론 함수
+from utils.diffuser_utils import (  # Task 3b의 핵심 추론 함수
     apply_conditioning,
     get_diffuser_buffers,
     q_sample,
@@ -16,15 +16,10 @@ from impls.utils.diffuser_utils import (  # Task 3b의 핵심 추론 함수
 )
 
 # ogbench 유틸리티
-from impls.utils.flax_utils import (
-    ModuleDict,
-    TrainState,
-    nonpytree_field,
-    restore_agent,
-)
+from utils.flax_utils import ModuleDict, TrainState, nonpytree_field, restore_agent
 
 # Task 1에서 포팅한 모델
-from impls.utils.networks import TemporalUnet, ValueFunction
+from utils.networks import TemporalUnet, ValueFunction
 
 
 class DiffuserDiffusionAgent(flax.struct.PyTreeNode):

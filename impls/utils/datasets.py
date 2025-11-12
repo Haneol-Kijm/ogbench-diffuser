@@ -459,19 +459,7 @@ class HGCDataset(GCDataset):
         return batch
 
 
-import dataclasses
-from collections import namedtuple
-from typing import Any
-
-import numpy as np
-
-from impls.utils.normalization import DatasetNormalizer
-
-# (다른 필요한 import ... )
-
-# diffuser/datasets/sequence.py (lines 13-14)에서 가져옴
-Batch = namedtuple("Batch", "trajectories conditions")
-ValueBatch = namedtuple("ValueBatch", "trajectories conditions values")
+from utils.normalization import DatasetNormalizer
 
 
 @dataclasses.dataclass
