@@ -60,13 +60,11 @@ class DiffuserDiffusionAgent(flax.struct.PyTreeNode):
         )
 
         # 3. Unet 예측
-        # (network.apply_fn은 ModuleDict를 호출, 'unet' 키 필요)
-        x_recon = self.network.apply_fn(
-            grad_params,  # {'unet': unet_params}
+        x_recon = self.network.select("unet")(
             x_noisy,
             batch["conditions"],
             t,
-            method="unet",  # ModuleDict의 'unet' 모델 호출
+            params=grad_params,
         )
         x_recon = apply_conditioning(
             x_recon, batch["conditions"], self.config["action_dim"]
@@ -120,7 +118,7 @@ class DiffuserDiffusionAgent(flax.struct.PyTreeNode):
         return self.replace(network=new_network, rng=new_rng), info
 
     @jax.jit
-    def sample_actions(self, observations, goals, seed):
+    def sample_actions(self, observations, goals, seed, temperature=0.0):
         """가이드 샘플링(추론) 실행. ogbench/utils/evaluation.py가 호출함"""
         rng = jax.random.PRNGKey(seed)
 
@@ -292,6 +290,10 @@ def get_config():
             normalizer="GaussianNormalizer",  # locomotion.py 기본값
             max_path_length=1000,
             use_padding=True,
+            frame_stack=None,
+            p_aug=0.0,
+            discrete=False,
+            encoder=None,
             # Model (TemporalUnet)
             horizon=32,
             dim=32,
