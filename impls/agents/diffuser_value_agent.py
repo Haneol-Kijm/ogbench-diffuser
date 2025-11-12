@@ -206,26 +206,33 @@ class DiffuserValueAgent(flax.struct.PyTreeNode):
 def get_config():
     """
     ogbench/main.py가 로드할 기본 설정.
-    diffuser/config/locomotion.py의 'values' 딕셔너리 기준
-
+    gcbc.py의 스타일을 참고하여 재구성.
     """
     config = ml_collections.ConfigDict(
         dict(
-            # Agent
+            # === Agent hyperparameters ===
             agent_name="diffuser_value",
-            lr=2e-4,
-            # Dataset (DiffuserValueDataset)
+            lr=2e-4,  # 원본 locomotion.py의 'values' lr
+            # === Dataset hyperparameters ===
+            # (DiffuserValueDataset이 사용할 설정)
             dataset_class="DiffuserValueDataset",
-            normalizer="GaussianNormalizer",  # locomotion.py 기본값
+            normalizer="GaussianNormalizer",
             max_path_length=1000,
-            # Model (ValueFunction)
+            use_padding=True,  # DiffuserSequenceDataset의 기본값
+            discount=0.99,  # DiffuserValueDataset이 가치 계산에 사용
+            # === main.py 호환성용 설정 ===
+            # (gcbc.py 참고, main.py 실행에 필요)
+            frame_stack=None,  # pointmaze 등은 프레임 스태킹 미사용
+            p_aug=0.0,  # gcbc 호환성용
+            discrete=False,  # main.py에서 사용
+            encoder=None,  # gcbc 호환성용
+            # === Model (ValueFunction) hyperparameters ===
             horizon=32,
             dim=32,
             dim_mults=(1, 2, 4, 8),
-            # Diffusion (ValueDiffusion)
+            # === Diffusion (ValueDiffusion) hyperparameters ===
             n_diffusion_steps=20,
-            discount=0.99,  # (ValueDataset이 사용)
-            # training.py 하이퍼파라미터 (main.py가 오버라이드)
+            # === Training hyperparameters (main.py 플래그로 오버라이드 됨) ===
             batch_size=32,
             n_train_steps=200e3,  # 원본 스텝 수
         )
