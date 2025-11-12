@@ -1058,7 +1058,7 @@ class ValueFunction(nn.Module):
             ]
         )
 
-        self.blocks = []
+        blocks = []
         num_resolutions = len(in_out)
 
         print(in_out)
@@ -1083,10 +1083,12 @@ class ValueFunction(nn.Module):
                 ),
                 Downsample1d(dim_out),
             )
-            self.blocks.append(block_modules)
+            blocks.append(block_modules)
 
             if not is_last:
                 horizon_curr = horizon_curr // 2
+
+        self.blocks = tuple(blocks)
 
         mid_dim = dims[-1]
         mid_dim_2 = mid_dim // 2
