@@ -596,9 +596,9 @@ class Downsample1d(nn.Module):
         x_transposed = jnp.transpose(x, (0, 2, 1))
 
         # nn.Conv(stride=2)
-        out = nn.Conv(features=self.dim, kernel_size=(3,), strides=(2,), padding=1)(
-            x_transposed
-        )
+        out = nn.Conv(
+            features=self.dim, kernel_size=(3,), strides=(2,), padding="same"
+        )(x_transposed)
 
         # (B, L', C) -> (B, C, L')
         return jnp.transpose(out, (0, 2, 1))
@@ -625,7 +625,7 @@ class Upsample1d(nn.Module):
             features=self.dim,
             kernel_size=(4,),
             strides=(2,),
-            padding=1,  # PyTorch의 padding=1과 동일하게 작동
+            padding="same",  # PyTorch의 padding=1과 동일하게 작동
         )(x_transposed)
 
         # (B, L', C) -> (B, C, L')
