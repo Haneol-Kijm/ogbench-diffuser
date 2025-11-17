@@ -1183,7 +1183,6 @@ class Mlp(nn.Module):
     act_layer: Any = nn.gelu
     bias: bool = True
     drop: float = 0.0
-    use_conv: bool = False  # (ogbench 스타일에서는 사용되지 않음)
 
     @nn.compact
     def __call__(self, x, deterministic: bool):
