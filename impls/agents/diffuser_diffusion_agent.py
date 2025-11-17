@@ -1,3 +1,5 @@
+import os
+import pickle
 from typing import Any, Dict
 
 import flax
@@ -120,7 +122,13 @@ class DiffuserDiffusionAgent(flax.struct.PyTreeNode):
     @jax.jit
     def sample_actions(self, observations, goals, seed, temperature=0.0):
         """가이드 샘플링(추론) 실행. ogbench/utils/evaluation.py가 호출함"""
-        rng = jax.random.PRNGKey(seed)
+        rng, _ = jax.random.split(seed)
+
+        unbatched = observations.ndim == 1
+        if unbatched:
+            observations = observations[None, ...]
+            if goals is not None:
+                goals = goals[None, ...]
 
         # 1. 입력 변환 (ogbench -> diffuser)
         batch_size = observations.shape[0]
@@ -134,8 +142,10 @@ class DiffuserDiffusionAgent(flax.struct.PyTreeNode):
         trajectories = sample_loop_with_guidance(
             unet_params=self.network.params,  # Unet 파라미터
             value_params=self.value_network.params,  # 동결된 Value 파라미터
-            unet_apply_fn=self.network.apply_fn,  # Unet apply (ModuleDict)
-            value_apply_fn=self.value_network.apply_fn,  # Value apply (ModuleDict)
+            unet_apply_fn=self.network.select("unet"),  # Unet apply (ModuleDict)
+            value_apply_fn=self.value_network.select(
+                "value"
+            ),  # Value apply (ModuleDict)
             buffers=self.buffers,
             shape=shape,
             cond=cond,
@@ -153,7 +163,10 @@ class DiffuserDiffusionAgent(flax.struct.PyTreeNode):
         #
         actions = trajectories[:, 0, : self.config["action_dim"]]
 
-        return actions
+        if unbatched:
+            return actions[0]
+        else:
+            return actions
 
     # --- 4. Create (ogbench 스타일) ---
     @classmethod
@@ -241,11 +254,32 @@ class DiffuserDiffusionAgent(flax.struct.PyTreeNode):
 
         # 4b. 가중치 복원
         print(f"Loading ValueFunction from: {config['value_checkpoint_path']}")
-        restored_value_state = restore_agent(
-            dummy_value_state,
+        # restored_value_state = restore_agent(
+        #     dummy_value_state,
+        #     config["value_checkpoint_path"],
+        #     config["value_checkpoint_epoch"],
+        # )
+
+        ckpt_path = os.path.join(
             config["value_checkpoint_path"],
-            config["value_checkpoint_epoch"],
+            f"params_{config['value_checkpoint_epoch']}.pkl",
         )
+
+        print(f"Manually loading Value network state from: {ckpt_path}")
+        with open(ckpt_path, "rb") as f:
+            # flax_utils.py line 196과 동일한 방식 (pickle 사용)
+            load_dict = pickle.load(f)
+
+        # load_dict['agent']는 DiffuserValueAgent의 전체 state_dict입니다.
+        # 우리는 그것의 'network' (TrainState) 부분만 필요합니다.
+        value_network_state_dict = load_dict["agent"]["network"]
+
+        # dummy_value_state (TrainState 뼈대)에
+        # value_network_state_dict (TrainState 내용물)를 복원합니다.
+        restored_value_state = flax.serialization.from_state_dict(
+            dummy_value_state, value_network_state_dict
+        )
+
         # 동결된 파라미터와 apply_fn을 value_network로 묶음
         value_network = restored_value_state.replace(tx=None)  # 옵티마이저 제거
 
