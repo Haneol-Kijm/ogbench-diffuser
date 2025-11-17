@@ -122,7 +122,7 @@ def diffusion_loss_fn(
     x_noisy = apply_conditioning(x_noisy, cond, action_dim)
 
     # 백본 모델(Unet) 호출
-    x_recon = unet_apply_fn(unet_params, x_noisy, cond, t)
+    x_recon = unet_apply_fn(x_noisy, cond, t, params=unet_params)
     x_recon = apply_conditioning(x_recon, cond, action_dim)
 
     assert noise.shape == x_recon.shape
@@ -186,7 +186,7 @@ def p_mean_variance(
 
     """
     # 백본 모델(Unet) 호출
-    pred_noise = unet_apply_fn(unet_params, x, cond, t)
+    pred_noise = unet_apply_fn(x, cond, t, params=unet_params)
 
     if predict_epsilon:
         x_recon = predict_start_from_noise(buffers, x, t, pred_noise)
@@ -207,6 +207,7 @@ def p_mean_variance(
     static_argnames=(
         "unet_apply_fn",
         "value_apply_fn",
+        "shape",
         "action_dim",
         "n_timesteps",
         "predict_epsilon",
@@ -242,7 +243,7 @@ def sample_loop_with_guidance(
     # 1. 가이던스 그래디언트 함수 정의
     # 1a. (원본) 값을 반환하는 함수를 먼저 정의
     def value_fn_body(v_params, x_t, cond, t):
-        value_pred = value_apply_fn(v_params, x_t, cond, t)
+        value_pred = value_apply_fn(x_t, cond, t, params=v_params)
         return value_pred.sum()
 
     # 1b. [수정된 부분] "함수 공장"을 명시적으로 호출
