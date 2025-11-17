@@ -1280,16 +1280,15 @@ class Layer(nn.Module):
 
     @nn.compact
     def __call__(self, x, c, deterministic: bool):
-        # x: (B, N, C_hidden), c: (B, C_hidden) (시간 임베딩)
-
-        # adaLN-Zero: t 임베딩 'c'로 6개의 파라미터(shift/scale/gate * 2) 예측
-        # (B, C_hidden) -> (B, 6 * C_hidden)
+        # adaLN-Zero 초기화: weights=0, bias=0 -> nn.initializers.zeros
         mod_params = nn.Sequential(
             [
                 nn.silu,
                 nn.Dense(
-                    6 * self.hidden_size, kernel_init=default_init(0.0)
-                ),  # 원본은 0으로 초기화
+                    6 * self.hidden_size,
+                    kernel_init=nn.initializers.zeros,
+                    bias_init=nn.initializers.zeros,
+                ),
             ]
         )(c)
 
@@ -1297,8 +1296,8 @@ class Layer(nn.Module):
             mod_params, 6, axis=1
         )
 
-        # 1. Self-Attention (with adaLN)
-        x_norm1 = nn.LayerNorm(use_scale=False, use_bias=False)(x)
+        # 1. Attention
+        x_norm1 = nn.LayerNorm(use_bias=False, use_scale=False, epsilon=1e-6)(x)
         x_mod1 = modulate(x_norm1, shift_msa, scale_msa)
 
         attn_block = Attention(
@@ -1312,69 +1311,64 @@ class Layer(nn.Module):
         # gate_msa를 (B, 1, 1)이 아닌 (B, 1, C)로 브로드캐스팅
         x = x + gate_msa[:, None, :] * attn_out
 
-        # 2. MLP (with adaLN)
-        x_norm2 = nn.LayerNorm(use_scale=False, use_bias=False)(x)
+        # 2. MLP (drop=0 하드코딩 반영)
+        x_norm2 = nn.LayerNorm(use_bias=False, use_scale=False, epsilon=1e-6)(x)
         x_mod2 = modulate(x_norm2, shift_mlp, scale_mlp)
 
         mlp_block = Mlp(
             in_features=self.hidden_size,
             hidden_features=int(self.hidden_size * self.mlp_ratio),
             act_layer=nn.gelu,
-            drop=0.0,
+            drop=0.0,  # PyTorch 원본 drop=0 반영
         )
         mlp_out = mlp_block(x_mod2, deterministic=deterministic)
-
         x = x + gate_mlp[:, None, :] * mlp_out
-
         return x
 
 
 class FinalLayer(nn.Module):
-    """DiT의 최종 출력 레이어"""
-
     hidden_size: int
     out_channels: int
 
     @nn.compact
     def __call__(self, x, c):
-        # c: (B, C_hidden)
+        # adaLN-Zero 초기화: zeros
         mod_params = nn.Sequential(
             [
                 nn.silu,
                 nn.Dense(
-                    2 * self.hidden_size, kernel_init=default_init(0.0)
-                ),  # 원본은 0으로 초기화
+                    2 * self.hidden_size,
+                    kernel_init=nn.initializers.zeros,
+                    bias_init=nn.initializers.zeros,
+                ),
             ]
         )(c)
-
         shift, scale = jnp.split(mod_params, 2, axis=1)
 
-        x_norm = nn.LayerNorm(use_scale=False, use_bias=False)(x)
+        x_norm = nn.LayerNorm(use_bias=False, use_scale=False, epsilon=1e-6)(x)
         x_mod = modulate(x_norm, shift, scale)
-        x_out = nn.Dense(self.out_channels, kernel_init=default_init(0.0))(
-            x_mod
-        )  # 원본은 0으로 초기화
-
+        # Final Linear 초기화: zeros
+        x_out = nn.Dense(
+            self.out_channels,
+            kernel_init=nn.initializers.zeros,
+            bias_init=nn.initializers.zeros,
+        )(x_mod)
         return x_out
 
 
 class DiT_TimestepEmbedder(nn.Module):
-    """DiT 스타일 Sinusoidal 시간 임베딩 MLP"""
-
     hidden_size: int
     frequency_embedding_size: int = 256
     max_period: int = 10000
 
     @staticmethod
     def timestep_embedding(t, dim, max_period=10000):
-        # t: (B,)
         half = dim // 2
         freqs = jnp.exp(
             -jnp.log(max_period)
             * jnp.arange(start=0, stop=half, dtype=jnp.float32)
             / half
         )
-        # t: (B,) -> (B, 1), freqs: (half,) -> (1, half)
         args = t[:, None] * freqs[None, :]
         embedding = jnp.concatenate([jnp.cos(args), jnp.sin(args)], axis=-1)
         if dim % 2:
@@ -1388,11 +1382,12 @@ class DiT_TimestepEmbedder(nn.Module):
         t_freq = self.timestep_embedding(
             t, self.frequency_embedding_size, self.max_period
         )
+        # 초기화: Normal(std=0.02) 반영
         t_emb = nn.Sequential(
             [
-                nn.Dense(self.hidden_size, kernel_init=default_init()),
+                nn.Dense(self.hidden_size, kernel_init=nn.initializers.normal(0.02)),
                 nn.silu,
-                nn.Dense(self.hidden_size, kernel_init=default_init()),
+                nn.Dense(self.hidden_size, kernel_init=nn.initializers.normal(0.02)),
             ]
         )(t_freq)
         return t_emb
@@ -1418,58 +1413,40 @@ class TimeSeriesEmbedder(nn.Module):
 
     @nn.compact
     def __call__(self, x):
-        # x: (B, C, T) - 원본 PyTorch 입력 순서 가정
+        # x: (B, C, T)
         B, C, T = x.shape
         assert (
             T == self.seq_len
         ), f"Input seq len ({T}) doesn't match model ({self.seq_len})."
 
-        # Proj 구현
         if self.proj == "conv":
-            # Conv1d: (B, C, T) -> (B, T, C)로 바꿔서 JAX Conv 적용
             x_t = x.transpose(0, 2, 1)
-            # padding='SAME'은 PyTorch의 padding='same'과 동일
             x_embed = nn.Conv(
                 features=self.embed_dim,
                 kernel_size=(self.conv_k,),
                 padding="SAME",
                 use_bias=self.bias,
                 kernel_init=nn.initializers.xavier_uniform(),
-            )(
-                x_t
-            )  # (B, T, D)
-
-            # 원본의 Conv1d는 (B, D, T)를 뱉지만, JAX Conv는 (B, T, D)를 뱉음.
-            # 원본 로직 일치를 위해 (B, D, T)로 다시 돌려놓음 (개념상)
+            )(x_t)
             x_embed = x_embed.transpose(0, 2, 1)  # (B, D, T)
-
         elif self.proj == "linear":
-            # Linear: (B, C, T) -> (B, T, C) -> Dense -> (B, T, D) -> (B, D, T)
             x_t = x.transpose(0, 2, 1)
             x_embed = nn.Dense(
                 features=self.embed_dim,
                 use_bias=self.bias,
                 kernel_init=nn.initializers.xavier_uniform(),
-            )(
-                x_t
-            )  # (B, T, D)
+            )(x_t)
             x_embed = x_embed.transpose(0, 2, 1)  # (B, D, T)
 
-        # Flatten 로직 (1:1 재현)
         if self.flatten:
-            # (B, D, T) -> (B, T, D)
-            x_embed = x_embed.transpose(0, 2, 1)
-
-        # Norm Layer는 원본에서 None이므로 생략 (Identity)
+            x_embed = x_embed.transpose(0, 2, 1)  # (B, T, D)
 
         return x_embed
 
 
 class DiT_Transformer(nn.Module):
-    """DiT 아키텍처 본체"""
-
-    seq_len: int
-    in_channels: int
+    seq_len: int = 2
+    in_channels: int = 4
     out_channels: Optional[int] = None
     hidden_size: int = 1152
     depth: int = 28
@@ -1477,16 +1454,20 @@ class DiT_Transformer(nn.Module):
     mlp_ratio: float = 4.0
     x_emb_proj: str = "conv"
     x_emb_proj_conv_k: int = 1
+    # [수정] RL에서 불필요하지만 원본 대응을 위해 인자는 남겨둠
+    channel_as_token: bool = False
 
     @nn.compact
     def __call__(self, x, t, deterministic: bool):
-        # x: (B, C_in, T), t: (B,)
+        # [수정] RL 궤적 생성에서 채널 토큰화는 사용하지 않으므로 안전장치
+        assert (
+            not self.channel_as_token
+        ), "channel_as_token=True is not supported for RL trajectory generation."
 
-        # 1. 시간 임베딩
-        t_emb = DiT_TimestepEmbedder(hidden_size=self.hidden_size)(t)  # (B, D)
-        c = t_emb  # 컨디션
+        # x: (B, C, T), t: (B,)
+        t_emb = DiT_TimestepEmbedder(hidden_size=self.hidden_size)(t)
+        c = t_emb
 
-        # 2. 입력 임베딩 + 위치 임베딩
         x_embedder = TimeSeriesEmbedder(
             seq_len=self.seq_len,
             in_channels=self.in_channels,
@@ -1496,28 +1477,23 @@ class DiT_Transformer(nn.Module):
         )
         x_embed = x_embedder(x)  # (B, T, D)
 
-        # 위치 임베딩 초기화 (원본 initialize_weights 로직)
+        # Pos Embed 초기화
         pos_embed_data = get_1d_sincos_pos_embed_jax(self.hidden_size, self.seq_len)
         pos_embed = self.param(
             "pos_embed",
-            lambda key, shape, dtype: pos_embed_data[None, ...],  # (1, T, D)
+            lambda key, shape, dtype: pos_embed_data[None, ...],
             (1, self.seq_len, self.hidden_size),
             jnp.float32,
         )
+        x = x_embed + pos_embed
 
-        x = x_embed + pos_embed  # (B, T, D)
-
-        # 3. 트랜스포머 블록 (DiT Layer)
         for _ in range(self.depth):
             x = Layer(
                 hidden_size=self.hidden_size,
                 num_heads=self.num_heads,
                 mlp_ratio=self.mlp_ratio,
-            )(
-                x, c, deterministic=deterministic
-            )  # (B, T, D)
+            )(x, c, deterministic=deterministic)
 
-        # 4. 최종 레이어
         final_out_channels = self.out_channels or self.in_channels
         x_out = FinalLayer(
             hidden_size=self.hidden_size, out_channels=final_out_channels
@@ -1552,11 +1528,6 @@ class TransformerFlow(nn.Module):
 
         b, t_len, c_in = x.shape
 
-        # JAX (B, T, C) -> PyTorch (B, C, T)
-        x_t = x.transpose(0, 2, 1)
-
-        # t가 (B, 1)이나 (B, T) 등으로 들어올 경우 (B,)로 축소
-        # (JAX에서는 보통 (B,)로 잘 들어옴)
         if t.ndim > 1:
             t = t[..., 0]
         if t.ndim == 0:
@@ -1573,6 +1544,7 @@ class TransformerFlow(nn.Module):
             mlp_ratio=self.mlp_ratio,
             x_emb_proj=self.x_emb_proj,
             x_emb_proj_conv_k=self.x_emb_proj_conv_k,
+            channel_as_token=False,  # 명시적 False
         )
         x_out_t = dit_model(x_t, t, deterministic=deterministic)  # (B, C_out, T)
 
