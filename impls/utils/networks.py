@@ -1159,3 +1159,424 @@ class ValueFunction(nn.Module):
         out = self.final_layer2(x)
 
         return out
+
+
+# ==============================================================================
+# "flow_guidance" (PyTorch) DiT 아키텍처 1:1 JAX/Flax 이식 코드
+# 원본: ai4science-westlakeu/flow_guidance/.../models_flow/transformer.py
+# 대상: seohongpark/ogbench/impls/utils/networks.py
+# ==============================================================================
+
+from functools import partial
+from typing import Tuple
+
+
+#################################################################################
+#                    Transformer Blocks from DiT                                #
+#################################################################################
+class Mlp(nn.Module):
+    """DiT의 MLP 블록 (GELU 사용)"""
+
+    in_features: int
+    hidden_features: Optional[int] = None
+    out_features: Optional[int] = None
+    act_layer: Any = nn.gelu
+    bias: bool = True
+    drop: float = 0.0
+    use_conv: bool = False  # (ogbench 스타일에서는 사용되지 않음)
+
+    @nn.compact
+    def __call__(self, x, deterministic: bool):
+        out_features = self.out_features or self.in_features
+        hidden_features = self.hidden_features or self.in_features
+
+        # JAX의 nn.Dense는 bias=True가 기본값
+        x = nn.Dense(hidden_features, kernel_init=default_init())(x)
+        x = self.act_layer(x)
+        x = nn.Dropout(rate=self.drop)(x, deterministic=deterministic)
+        x = nn.Dense(out_features, kernel_init=default_init())(x)
+        x = nn.Dropout(rate=self.drop)(x, deterministic=deterministic)
+        return x
+
+
+class Attention(nn.Module):
+    """DiT의 Multi-Head Attention (qkv 수동 구현)"""
+
+    dim: int
+    num_heads: int = 8
+    qkv_bias: bool = False
+    attn_drop: float = 0.0
+    proj_drop: float = 0.0
+
+    @nn.compact
+    def __call__(self, x, deterministic: bool):
+        B, N, C = x.shape
+        assert self.dim % self.num_heads == 0, "dim should be divisible by num_heads"
+        head_dim = self.dim // self.num_heads
+        scale = head_dim**-0.5
+
+        # qkv를 3*dim으로 한 번에 계산
+        qkv = nn.Dense(
+            self.dim * 3, use_bias=self.qkv_bias, kernel_init=default_init()
+        )(x)
+        # (B, N, 3 * C) -> (B, N, 3, num_heads, head_dim) -> (3, B, num_heads, N, head_dim)
+        qkv = qkv.reshape(B, N, 3, self.num_heads, head_dim).transpose(2, 0, 3, 1, 4)
+        q, k, v = qkv[0], qkv[1], qkv[2]  # (B, num_heads, N, head_dim)
+
+        # Scaled Dot-Product Attention
+        attn = (q @ k.transpose(0, 1, 3, 2)) * scale  # (B, num_heads, N, N)
+        attn = nn.softmax(attn, axis=-1)
+        attn = nn.Dropout(rate=self.attn_drop)(attn, deterministic=deterministic)
+
+        # (B, num_heads, N, N) @ (B, num_heads, N, head_dim) -> (B, num_heads, N, head_dim)
+        x = (attn @ v).transpose(0, 2, 1, 3).reshape(B, N, C)
+
+        x = nn.Dense(self.dim, kernel_init=default_init())(x)
+        x = nn.Dropout(rate=self.proj_drop)(x, deterministic=deterministic)
+        return x
+
+
+def modulate(x, shift, scale):
+    """adaLN-Zero의 핵심 연산. (B, N, C) * (B, 1, C) + (B, 1, C)"""
+    return x * (1 + scale[:, None, :]) + shift[:, None, :]
+
+
+#################################################################################
+#                   Sine/Cosine Positional Embedding Functions                  #
+#################################################################################
+def get_1d_sincos_pos_embed_from_grid_jax(embed_dim, pos):
+    assert embed_dim % 2 == 0
+    omega = jnp.arange(embed_dim // 2, dtype=jnp.float64)
+    omega /= embed_dim / 2.0
+    omega = 1.0 / 10000**omega  # (D/2,)
+
+    pos = pos.reshape(-1)  # (M,)
+    out = jnp.einsum("m,d->md", pos, omega)  # (M, D/2)
+
+    emb_sin = jnp.sin(out)
+    emb_cos = jnp.cos(out)
+
+    emb = jnp.concatenate([emb_sin, emb_cos], axis=1)  # (M, D)
+    return emb
+
+
+def get_1d_sincos_pos_embed_jax(embed_dim, grid_size, dtype=jnp.float32):
+    grid = jnp.arange(grid_size, dtype=dtype)
+    pos_embed = get_1d_sincos_pos_embed_from_grid_jax(embed_dim, grid)  # (T, D)
+    return pos_embed
+
+
+#################################################################################
+#                   Core Transformer Layers from DiT                            #
+#################################################################################
+class Layer(nn.Module):
+    """DiT의 핵심 트랜스포머 블록 (adaLN-Zero 적용)"""
+
+    hidden_size: int
+    num_heads: int
+    mlp_ratio: float = 4.0
+    attn_drop: float = 0.0
+    proj_drop: float = 0.0
+
+    @nn.compact
+    def __call__(self, x, c, deterministic: bool):
+        # x: (B, N, C_hidden), c: (B, C_hidden) (시간 임베딩)
+
+        # adaLN-Zero: t 임베딩 'c'로 6개의 파라미터(shift/scale/gate * 2) 예측
+        # (B, C_hidden) -> (B, 6 * C_hidden)
+        mod_params = nn.Sequential(
+            [
+                nn.silu,
+                nn.Dense(
+                    6 * self.hidden_size, kernel_init=default_init(0.0)
+                ),  # 원본은 0으로 초기화
+            ]
+        )(c)
+
+        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = jnp.split(
+            mod_params, 6, axis=1
+        )
+
+        # 1. Self-Attention (with adaLN)
+        x_norm1 = nn.LayerNorm(use_scale=False, use_bias=False)(x)
+        x_mod1 = modulate(x_norm1, shift_msa, scale_msa)
+
+        attn_block = Attention(
+            dim=self.hidden_size,
+            num_heads=self.num_heads,
+            attn_drop=self.attn_drop,
+            proj_drop=self.proj_drop,
+        )
+        attn_out = attn_block(x_mod1, deterministic=deterministic)
+
+        # gate_msa를 (B, 1, 1)이 아닌 (B, 1, C)로 브로드캐스팅
+        x = x + gate_msa[:, None, :] * attn_out
+
+        # 2. MLP (with adaLN)
+        x_norm2 = nn.LayerNorm(use_scale=False, use_bias=False)(x)
+        x_mod2 = modulate(x_norm2, shift_mlp, scale_mlp)
+
+        mlp_block = Mlp(
+            in_features=self.hidden_size,
+            hidden_features=int(self.hidden_size * self.mlp_ratio),
+            act_layer=nn.gelu,
+            drop=0.0,
+        )
+        mlp_out = mlp_block(x_mod2, deterministic=deterministic)
+
+        x = x + gate_mlp[:, None, :] * mlp_out
+
+        return x
+
+
+class FinalLayer(nn.Module):
+    """DiT의 최종 출력 레이어"""
+
+    hidden_size: int
+    out_channels: int
+
+    @nn.compact
+    def __call__(self, x, c):
+        # c: (B, C_hidden)
+        mod_params = nn.Sequential(
+            [
+                nn.silu,
+                nn.Dense(
+                    2 * self.hidden_size, kernel_init=default_init(0.0)
+                ),  # 원본은 0으로 초기화
+            ]
+        )(c)
+
+        shift, scale = jnp.split(mod_params, 2, axis=1)
+
+        x_norm = nn.LayerNorm(use_scale=False, use_bias=False)(x)
+        x_mod = modulate(x_norm, shift, scale)
+        x_out = nn.Dense(self.out_channels, kernel_init=default_init(0.0))(
+            x_mod
+        )  # 원본은 0으로 초기화
+
+        return x_out
+
+
+class DiT_TimestepEmbedder(nn.Module):
+    """DiT 스타일 Sinusoidal 시간 임베딩 MLP"""
+
+    hidden_size: int
+    frequency_embedding_size: int = 256
+    max_period: int = 10000
+
+    @staticmethod
+    def timestep_embedding(t, dim, max_period=10000):
+        # t: (B,)
+        half = dim // 2
+        freqs = jnp.exp(
+            -jnp.log(max_period)
+            * jnp.arange(start=0, stop=half, dtype=jnp.float32)
+            / half
+        )
+        # t: (B,) -> (B, 1), freqs: (half,) -> (1, half)
+        args = t[:, None] * freqs[None, :]
+        embedding = jnp.concatenate([jnp.cos(args), jnp.sin(args)], axis=-1)
+        if dim % 2:
+            embedding = jnp.concatenate(
+                [embedding, jnp.zeros_like(embedding[:, :1])], axis=-1
+            )
+        return embedding
+
+    @nn.compact
+    def __call__(self, t):
+        t_freq = self.timestep_embedding(
+            t, self.frequency_embedding_size, self.max_period
+        )
+        t_emb = nn.Sequential(
+            [
+                nn.Dense(self.hidden_size, kernel_init=default_init()),
+                nn.silu,
+                nn.Dense(self.hidden_size, kernel_init=default_init()),
+            ]
+        )(t_freq)
+        return t_emb
+
+
+# seohongpark/ogbench/impls/utils/networks.py
+
+
+class TimeSeriesEmbedder(nn.Module):
+    """1D 시계열 임베더 (Conv1d 또는 Linear)"""
+
+    seq_len: int = 224
+    in_channels: int = 3
+    embed_dim: int = 768
+    # [수정 2] flatten과 norm_layer 로직 부활
+    flatten: bool = True
+    # norm_layer는 Flax에서 보통 모듈로 전달하지 않고, 필요하면 내부에서 정의하거나
+    # 플래그(use_norm)로 처리합니다. 원본이 None(Identity)만 쓰므로 여기선 생략하되
+    # flatten 로직은 아래 __call__에 반영했습니다.
+    bias: bool = True
+    proj: str = "conv"
+    conv_k: int = 1
+
+    @nn.compact
+    def __call__(self, x):
+        # x: (B, C, T) - 원본 PyTorch 입력 순서 가정
+        B, C, T = x.shape
+        assert (
+            T == self.seq_len
+        ), f"Input seq len ({T}) doesn't match model ({self.seq_len})."
+
+        # Proj 구현
+        if self.proj == "conv":
+            # Conv1d: (B, C, T) -> (B, T, C)로 바꿔서 JAX Conv 적용
+            x_t = x.transpose(0, 2, 1)
+            # padding='SAME'은 PyTorch의 padding='same'과 동일
+            x_embed = nn.Conv(
+                features=self.embed_dim,
+                kernel_size=(self.conv_k,),
+                padding="SAME",
+                use_bias=self.bias,
+                kernel_init=nn.initializers.xavier_uniform(),
+            )(
+                x_t
+            )  # (B, T, D)
+
+            # 원본의 Conv1d는 (B, D, T)를 뱉지만, JAX Conv는 (B, T, D)를 뱉음.
+            # 원본 로직 일치를 위해 (B, D, T)로 다시 돌려놓음 (개념상)
+            x_embed = x_embed.transpose(0, 2, 1)  # (B, D, T)
+
+        elif self.proj == "linear":
+            # Linear: (B, C, T) -> (B, T, C) -> Dense -> (B, T, D) -> (B, D, T)
+            x_t = x.transpose(0, 2, 1)
+            x_embed = nn.Dense(
+                features=self.embed_dim,
+                use_bias=self.bias,
+                kernel_init=nn.initializers.xavier_uniform(),
+            )(
+                x_t
+            )  # (B, T, D)
+            x_embed = x_embed.transpose(0, 2, 1)  # (B, D, T)
+
+        # Flatten 로직 (1:1 재현)
+        if self.flatten:
+            # (B, D, T) -> (B, T, D)
+            x_embed = x_embed.transpose(0, 2, 1)
+
+        # Norm Layer는 원본에서 None이므로 생략 (Identity)
+
+        return x_embed
+
+
+class DiT_Transformer(nn.Module):
+    """DiT 아키텍처 본체"""
+
+    seq_len: int
+    in_channels: int
+    out_channels: Optional[int] = None
+    hidden_size: int = 1152
+    depth: int = 28
+    num_heads: int = 16
+    mlp_ratio: float = 4.0
+    x_emb_proj: str = "conv"
+    x_emb_proj_conv_k: int = 1
+
+    @nn.compact
+    def __call__(self, x, t, deterministic: bool):
+        # x: (B, C_in, T), t: (B,)
+
+        # 1. 시간 임베딩
+        t_emb = DiT_TimestepEmbedder(hidden_size=self.hidden_size)(t)  # (B, D)
+        c = t_emb  # 컨디션
+
+        # 2. 입력 임베딩 + 위치 임베딩
+        x_embedder = TimeSeriesEmbedder(
+            seq_len=self.seq_len,
+            in_channels=self.in_channels,
+            embed_dim=self.hidden_size,
+            proj=self.x_emb_proj,
+            conv_k=self.x_emb_proj_conv_k,
+        )
+        x_embed = x_embedder(x)  # (B, T, D)
+
+        # 위치 임베딩 초기화 (원본 initialize_weights 로직)
+        pos_embed_data = get_1d_sincos_pos_embed_jax(self.hidden_size, self.seq_len)
+        pos_embed = self.param(
+            "pos_embed",
+            lambda key, shape, dtype: pos_embed_data[None, ...],  # (1, T, D)
+            (1, self.seq_len, self.hidden_size),
+            jnp.float32,
+        )
+
+        x = x_embed + pos_embed  # (B, T, D)
+
+        # 3. 트랜스포머 블록 (DiT Layer)
+        for _ in range(self.depth):
+            x = Layer(
+                hidden_size=self.hidden_size,
+                num_heads=self.num_heads,
+                mlp_ratio=self.mlp_ratio,
+            )(
+                x, c, deterministic=deterministic
+            )  # (B, T, D)
+
+        # 4. 최종 레이어
+        final_out_channels = self.out_channels or self.in_channels
+        x_out = FinalLayer(
+            hidden_size=self.hidden_size, out_channels=final_out_channels
+        )(
+            x, c
+        )  # (B, T, C_out)
+
+        # 원본은 (B, C, T)로 permute해서 반환
+        return x_out.transpose(0, 2, 1)  # (B, C_out, T)
+
+
+#################################################################################
+#                Wrapper for Flow Matching and Diffuser                         #
+#################################################################################
+class TransformerFlow(nn.Module):
+    """DiT를 Flow Matching 백본으로 사용하기 위한 래퍼"""
+
+    seq_len: int
+    in_channels: int
+    out_channels: Optional[int] = None
+    hidden_size: int = 1152
+    depth: int = 28
+    num_heads: int = 16
+    mlp_ratio: float = 4.0
+    x_emb_proj: str = "conv"
+    x_emb_proj_conv_k: int = 1
+
+    @nn.compact
+    def __call__(self, x, t, deterministic: bool = True):
+        # x: (B, T, C_in) - JAX/ogbench 표준 입력
+        # t: (B,)
+
+        b, t_len, c_in = x.shape
+
+        # JAX (B, T, C) -> PyTorch (B, C, T)
+        x_t = x.transpose(0, 2, 1)
+
+        # t가 (B, 1)이나 (B, T) 등으로 들어올 경우 (B,)로 축소
+        # (JAX에서는 보통 (B,)로 잘 들어옴)
+        if t.ndim > 1:
+            t = t[..., 0]
+        if t.ndim == 0:
+            t = jnp.repeat(t, b)
+
+        # DiT 모델 호출 (입/출력 모두 (B, C, T) 형식)
+        dit_model = DiT_Transformer(
+            seq_len=self.seq_len,
+            in_channels=self.in_channels,
+            out_channels=self.out_channels,
+            hidden_size=self.hidden_size,
+            depth=self.depth,
+            num_heads=self.num_heads,
+            mlp_ratio=self.mlp_ratio,
+            x_emb_proj=self.x_emb_proj,
+            x_emb_proj_conv_k=self.x_emb_proj_conv_k,
+        )
+        x_out_t = dit_model(x_t, t, deterministic=deterministic)  # (B, C_out, T)
+
+        # PyTorch (B, C, T) -> JAX (B, T, C)
+        x_out = x_out_t.transpose(0, 2, 1)
+
+        return x_out
