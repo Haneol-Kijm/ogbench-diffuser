@@ -1527,6 +1527,8 @@ class TransformerFlow(nn.Module):
 
         b, t_len, c_in = x.shape
 
+        x_t = x.transpose(0, 2, 1)
+
         if t.ndim > 1:
             t = t[..., 0]
         if t.ndim == 0:
