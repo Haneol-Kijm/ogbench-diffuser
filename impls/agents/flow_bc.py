@@ -24,6 +24,45 @@ def apply_conditioning(x, conditions, action_dim):
     return x
 
 
+def compute_ot_matching(x0, x1):
+    """
+    Sinkhorn 알고리즘을 사용한 Minibatch OT 매칭 (JAX/GPU Native).
+    x0: (B, D) Noise
+    x1: (B, D) Data
+    """
+    # 1. Cost Matrix (Squared Euclidean)
+    # (B, 1, D) - (1, B, D) -> (B, B, D) -> (B, B)
+    cost = jnp.sum(jnp.square(x0[:, None, :] - x1[None, :, :]), axis=-1)
+
+    # 2. Sinkhorn Algorithm
+    epsilon = 0.1
+    n_iters = 50
+
+    def log_sinkhorn_step(carry, _):
+        f, g = carry
+        g_cost = g[None, :] - cost
+        f_new = -epsilon * jax.nn.logsumexp(g_cost / epsilon, axis=1)
+        f_cost = f_new[:, None] - cost
+        g_new = -epsilon * jax.nn.logsumexp(f_cost / epsilon, axis=0)
+        return (f_new, g_new), None
+
+    B = x0.shape[0]
+    f = jnp.zeros(B)
+    g = jnp.zeros(B)
+
+    (f, g), _ = jax.lax.scan(log_sinkhorn_step, (f, g), None, length=n_iters)
+
+    # 3. Optimal Plan & Matching
+    # P_ij = exp((f_i + g_j - C_ij) / eps)
+    # 각 데이터(x1)에 대해 가장 확률 높은 노이즈(x0) 인덱스를 찾음
+    P = f[:, None] + g[None, :] - cost
+    x0_indices = jnp.argmax(P, axis=0)
+
+    x0_sorted = x0[x0_indices]
+
+    return x0_sorted, x1
+
+
 # ==============================================================================
 # 2. Flow BC Agent (ogbench Standard Style)
 # ==============================================================================
@@ -76,35 +115,41 @@ class FlowBCAgent(struct.PyTreeNode):
 
         return cls(state=state, rng=rng, horizon=horizon, action_dim=action_dim)
 
-    # [추가] ogbench 표준 인터페이스: Loss 계산 로직 분리
     def total_loss(self, batch, grad_params, rng=None):
-        # main.py에서 호출할 때는 rng가 없을 수 있음 -> self.rng 사용
         if rng is None:
             rng = self.rng
 
-        # RNG 분할 (Noise, Time)
         rng, noise_rng, t_rng = jax.random.split(rng, 3)
 
-        # 1. 데이터 준비
+        # 1. 데이터 준비 (x1)
         observations = batch["observations"]
         actions = batch["actions"]
-        x1 = jnp.concatenate([actions, observations], axis=-1)  # (B, T, C)
+        x1 = jnp.concatenate([actions, observations], axis=-1)
         B, T, C = x1.shape
 
-        # 2. Flow Matching Setup
+        # 2. Flow Matching Setup (x0)
         x0 = jax.random.normal(noise_rng, shape=x1.shape)
+
+        # ================= [OT 추가됨] =================
+        # x0(노이즈)와 x1(데이터) 사이의 거리를 최소화하도록 x0를 재정렬
+        # 3차원 (B, T, C)를 (B, T*C)로 펼쳐서 매칭 후 다시 복구
+        x0_flat = x0.reshape(B, -1)
+        x1_flat = x1.reshape(B, -1)
+
+        x0_flat_matched, _ = compute_ot_matching(x0_flat, x1_flat)
+
+        x0 = x0_flat_matched.reshape(B, T, C)
+        # ==============================================
+
         t = jax.random.uniform(t_rng, shape=(B,), minval=0.0, maxval=1.0)
 
-        # 3. Interpolation
+        # 3. Interpolation (이제 경로는 꼬이지 않은 직선이 됩니다)
         t_expanded = t[:, None, None]
         xt = t_expanded * x1 + (1 - t_expanded) * x0
-        ut = x1 - x0  # Target Velocity
+        ut = x1 - x0
 
         # 4. Forward Pass
-        # grad_params가 있으면 그것을 사용 (Gradient 계산용), 없으면 self.state.params 사용 (Validation용)
         params = grad_params if grad_params is not None else self.state.params
-
-        # self.state(...) 호출 시 params 인자를 전달
         vt = self.state(xt, t, deterministic=False, params=params)
 
         # 5. MSE Loss
