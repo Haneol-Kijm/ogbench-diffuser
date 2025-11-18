@@ -31,8 +31,8 @@ def apply_conditioning(x, conditions, action_dim):
 class FlowBCAgent(struct.PyTreeNode):
     state: TrainState
     rng: Any
-    horizon: int
-    action_dim: int
+    horizon: int = struct.field(pytree_node=False)
+    action_dim: int = struct.field(pytree_node=False)
 
     @classmethod
     def create(cls, seed, ex_observations, ex_actions, config):
