@@ -1245,7 +1245,7 @@ def modulate(x, shift, scale):
 #################################################################################
 def get_1d_sincos_pos_embed_from_grid_jax(embed_dim, pos):
     assert embed_dim % 2 == 0
-    omega = jnp.arange(embed_dim // 2, dtype=jnp.float64)
+    omega = jnp.arange(embed_dim // 2, dtype=jnp.float32)
     omega /= embed_dim / 2.0
     omega = 1.0 / 10000**omega  # (D/2,)
 
