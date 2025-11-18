@@ -186,9 +186,9 @@ def get_config():
             encoder=None,
             # TransformerFlow Hyperparameters
             horizon=32,
-            hidden_size=1152,
-            depth=28,
-            num_heads=16,
+            hidden_size=256,
+            depth=8,
+            num_heads=8,
             mlp_ratio=4.0,
             x_emb_proj="conv",
             x_emb_proj_conv_k=1,
