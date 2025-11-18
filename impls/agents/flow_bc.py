@@ -1,4 +1,5 @@
-from typing import Any, Dict, Optional
+from functools import partial
+from typing import Any, Dict, Optional, Tuple
 
 import jax
 import jax.numpy as jnp
@@ -24,13 +25,15 @@ def apply_conditioning(x, conditions, action_dim):
 
 
 # ==============================================================================
-# 2. Flow BC Agent
+# 2. Flow BC Agent (ogbench Standard Style)
 # ==============================================================================
 
 
 class FlowBCAgent(struct.PyTreeNode):
     state: TrainState
     rng: Any
+
+    # Static fields
     horizon: int = struct.field(pytree_node=False)
     action_dim: int = struct.field(pytree_node=False)
 
@@ -61,6 +64,7 @@ class FlowBCAgent(struct.PyTreeNode):
             x_emb_proj_conv_k=config["x_emb_proj_conv_k"],
         )
 
+        # Init params
         mock_input = jnp.zeros((1, horizon, input_dim))
         mock_t = jnp.zeros((1,))
         variables = network_def.init(init_rng, mock_input, mock_t, deterministic=True)
@@ -72,33 +76,57 @@ class FlowBCAgent(struct.PyTreeNode):
 
         return cls(state=state, rng=rng, horizon=horizon, action_dim=action_dim)
 
-    @jax.jit
-    def update(self, batch):
-        new_rng, step_rng, noise_rng, t_rng = jax.random.split(self.rng, 4)
+    # [추가] ogbench 표준 인터페이스: Loss 계산 로직 분리
+    def total_loss(self, batch, grad_params, rng=None):
+        # main.py에서 호출할 때는 rng가 없을 수 있음 -> self.rng 사용
+        if rng is None:
+            rng = self.rng
 
+        # RNG 분할 (Noise, Time)
+        rng, noise_rng, t_rng = jax.random.split(rng, 3)
+
+        # 1. 데이터 준비
         observations = batch["observations"]
         actions = batch["actions"]
-        x1 = jnp.concatenate([actions, observations], axis=-1)
+        x1 = jnp.concatenate([actions, observations], axis=-1)  # (B, T, C)
         B, T, C = x1.shape
 
+        # 2. Flow Matching Setup
         x0 = jax.random.normal(noise_rng, shape=x1.shape)
         t = jax.random.uniform(t_rng, shape=(B,), minval=0.0, maxval=1.0)
 
+        # 3. Interpolation
         t_expanded = t[:, None, None]
         xt = t_expanded * x1 + (1 - t_expanded) * x0
-        ut = x1 - x0
+        ut = x1 - x0  # Target Velocity
 
+        # 4. Forward Pass
+        # grad_params가 있으면 그것을 사용 (Gradient 계산용), 없으면 self.state.params 사용 (Validation용)
+        params = grad_params if grad_params is not None else self.state.params
+
+        # self.state(...) 호출 시 params 인자를 전달
+        vt = self.state(xt, t, deterministic=False, params=params)
+
+        # 5. MSE Loss
+        loss = jnp.mean(jnp.square(vt - ut))
+
+        return loss, {"loss": loss}
+
+    @jax.jit
+    def update(self, batch):
+        new_rng, step_rng = jax.random.split(self.rng)
+
+        # loss_fn 래퍼: apply_loss_fn이 요구하는 시그니처 (params -> loss, info)
         def loss_fn(params):
-            vt = self.state(xt, t, deterministic=False, params=params)
-            loss = jnp.mean(jnp.square(vt - ut))
-            return loss, {"loss": loss}
+            # total_loss에 현재 rng와 params를 전달
+            return self.total_loss(batch, grad_params=params, rng=step_rng)
 
+        # TrainState의 apply_loss_fn을 통해 Gradient 계산 및 업데이트 수행
         new_state, info = self.state.apply_loss_fn(loss_fn)
 
         return self.replace(state=new_state, rng=new_rng), info
 
-    # [중요 수정] sample 메서드가 외부 RNG(seed)를 받을 수 있도록 변경
-    @jax.jit
+    @partial(jax.jit, static_argnames=("nfe",))
     def sample(
         self,
         conditions: Dict[int, jnp.ndarray],
@@ -113,7 +141,6 @@ class FlowBCAgent(struct.PyTreeNode):
         ObsDim = first_cond.shape[-1]
         TotalDim = ActDim + ObsDim
 
-        # seed가 제공되면 그것을 쓰고, 아니면 내부 rng 사용
         if seed is not None:
             rng = seed
         else:
@@ -139,27 +166,23 @@ class FlowBCAgent(struct.PyTreeNode):
 
         return actions
 
-    # [추가] ogbench evaluation.py와의 인터페이스 호환을 위한 어댑터
     @jax.jit
     def sample_actions(self, observations, goals=None, seed=None, temperature=1.0):
-        """
-        impls/utils/evaluation.py의 evaluate 함수가 호출하는 표준 인터페이스.
-        """
-        # observations가 (ObsDim,) 형태의 단일 입력으로 들어올 경우 (B=1) 처리
         if observations.ndim == 1:
             observations = observations[None, ...]
             squeeze_output = True
         else:
             squeeze_output = False
 
-        # conditions 딕셔너리 생성 (t=0 시점의 관측값 고정)
+        if goals is not None:
+            if goals.ndim == 1:
+                goals = goals[None, ...]
+            observations = jnp.concatenate([observations, goals], axis=-1)
+
         conditions = {0: observations}
 
-        # 내부 sample 메서드 호출 (seed 전달)
-        # nfe는 기본값 32 사용 (필요시 config 등에서 가져오도록 수정 가능)
         actions = self.sample(conditions, seed=seed, nfe=32)
 
-        # 단일 입력이었으면 단일 출력으로 반환
         if squeeze_output:
             actions = actions[0]
 
@@ -184,17 +207,16 @@ def get_config():
             p_aug=0.0,
             discrete=False,
             encoder=None,
-            # TransformerFlow Hyperparameters
+            # Model Hyperparameters (RL Small)
             horizon=32,
             hidden_size=256,
-            depth=8,
-            num_heads=8,
+            depth=6,
+            num_heads=4,
             mlp_ratio=4.0,
             x_emb_proj="conv",
             x_emb_proj_conv_k=1,
             n_train_steps=1e6,
             batch_size=256,
-            # 추론 설정 (evaluation.py에서는 이 값을 직접 쓰진 않지만 기록용)
             nfe=32,
             clip_denoised=False,
             guidance_scale=1.0,
