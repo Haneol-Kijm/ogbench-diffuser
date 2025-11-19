@@ -96,19 +96,19 @@ class FlowBCAgent(struct.PyTreeNode):
         # But we don't have goal info in create args easily unless we inspect config or data
         # Let's assume if dataset_class is GCDiffuserSequenceDataset, we have goals.
         # Or simpler: just check config for 'goal_conditioned' flag or similar.
-        # For now, let's just add goal_dim if it's in the batch during training? 
+        # For now, let's just add goal_dim if it's in the batch during training?
         # No, model init needs it.
-        
+
         # Let's check config.
         is_goal_conditioned = config.get("dataset_class") == "GCDiffuserSequenceDataset"
-        
+
         if is_goal_conditioned:
-             # Goal is concatenated to observation
-             # We assume goal_dim == state_dim (standard in OGBench)
-             input_dim = action_dim + state_dim + state_dim
+            # Goal is concatenated to observation
+            # We assume goal_dim == state_dim (standard in OGBench)
+            input_dim = action_dim + state_dim + state_dim
         else:
-             input_dim = action_dim + state_dim
-             
+            input_dim = action_dim + state_dim
+
         horizon = config["horizon"]
 
         network_def = TransformerFlow(
@@ -145,19 +145,19 @@ class FlowBCAgent(struct.PyTreeNode):
         # 1. Prepare Data (x1)
         observations = batch["observations"]
         actions = batch["actions"]
-        
+
         # Handle Goal Conditioning
         if "actor_goals" in batch:
             goals = batch["actor_goals"]
             # Goals are usually (B, G). We need to broadcast to (B, T, G)
             # or if they are already (B, T, G) (unlikely for standard GCDataset logic which gives one goal per episode)
             # GCDiffuserSequenceDataset returns (B, G) for actor_goals.
-            
+
             if goals.ndim == 2:
                 # (B, G) -> (B, 1, G) -> (B, T, G)
                 goals = goals[:, None, :]
                 goals = jnp.tile(goals, (1, observations.shape[1], 1))
-                
+
             observations = jnp.concatenate([observations, goals], axis=-1)
 
         x1 = jnp.concatenate([actions, observations], axis=-1)
@@ -260,16 +260,16 @@ class FlowBCAgent(struct.PyTreeNode):
                 goals = goals[None, ...]
             if goals.ndim == 1:
                 goals = goals[None, ...]
-            
+
             # Broadcast goal to horizon if needed, but here sample_actions takes single obs/goal
             # and sample() handles the loop.
             # But wait, sample() takes 'conditions'.
             # If our model expects (Action + Obs + Goal), then 'conditions' should provide (Obs + Goal).
-            
+
             # sample() logic:
             # TotalDim = ActDim + ObsDim (where ObsDim includes Goal if conditioned)
             # conditions[0] = observations (which should include goal)
-            
+
             observations = jnp.concatenate([observations, goals], axis=-1)
 
         conditions = {0: observations}
@@ -292,10 +292,7 @@ def get_config():
         dict(
             agent_name="flow_bc",
             learning_rate=3e-4,
-        dict(
-            agent_name="flow_bc",
-            learning_rate=3e-4,
-            dataset_class="GCDiffuserSequenceDataset", # Default to GC version
+            dataset_class="GCDiffuserSequenceDataset",  # Default to GC version
             normalizer="GaussianNormalizer",
             max_path_length=1000,
             use_padding=True,
@@ -316,8 +313,6 @@ def get_config():
             nfe=32,
             clip_denoised=False,
             guidance_scale=1.0,
-            guidance_scale=1.0,
-            
             # GC Dataset Params (Default)
             value_p_curgoal=0.0,
             value_p_trajgoal=1.0,

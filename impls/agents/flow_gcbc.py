@@ -55,8 +55,9 @@ class FlowGCBCAgent(flax.struct.PyTreeNode):
     """Flow Matching Goal-Conditioned Behavioral Cloning (FlowGCBC) agent."""
 
     rng: Any
-    network: Any
+    network: TrainState
     config: Any = nonpytree_field()
+    action_dim: int = nonpytree_field()
 
     @classmethod
     def create(

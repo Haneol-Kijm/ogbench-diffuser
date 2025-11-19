@@ -525,11 +525,12 @@ class DiffuserSequenceDataset:
             self.fields_reshaped["actions"][i, :int_length] = self.fields["actions"][
                 current_idx : current_idx + int_length
             ]
-            self.fields_reshaped["rewards"][i, :int_length] = self.fields["rewards"][
-                current_idx : current_idx + int_length
-            ][
-                :, None
-            ]  # (L, 1) 형태로
+            if "rewards" in self.fields:
+                self.fields_reshaped["rewards"][i, :int_length] = self.fields[
+                    "rewards"
+                ][current_idx : current_idx + int_length][
+                    :, None
+                ]  # (L, 1) 형태로
 
             current_idx += int_length
 

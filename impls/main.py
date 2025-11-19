@@ -16,6 +16,7 @@ from utils.datasets import (
     DiffuserSequenceDataset,
     DiffuserValueDataset,
     GCDataset,
+    GCDiffuserSequenceDataset,
     HGCDataset,
 )
 from utils.env_utils import make_env_and_datasets
@@ -80,6 +81,7 @@ def main(_):
         "HGCDataset": HGCDataset,
         "DiffuserValueDataset": DiffuserValueDataset,
         "DiffuserSequenceDataset": DiffuserSequenceDataset,
+        "GCDiffuserSequenceDataset": GCDiffuserSequenceDataset,
     }[config["dataset_class"]]
     train_dataset = dataset_class(Dataset.create(**train_dataset), config)
     if val_dataset is not None:
