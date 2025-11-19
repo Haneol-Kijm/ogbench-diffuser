@@ -704,3 +704,124 @@ class DiffuserValueDataset(DiffuserSequenceDataset):
         # --- 🔺 [수정 완료] 🔺 ---
 
         return batch_dict
+
+
+@dataclasses.dataclass
+class GCDiffuserSequenceDataset(DiffuserSequenceDataset):
+    """
+    [Task 2] Trajectory + Goal Dataset.
+    Inherits from DiffuserSequenceDataset to get trajectories (B, H, D).
+    Adds logic from GCDataset to sample goals (B, G) via Hindsight Relabeling.
+    """
+
+    def __post_init__(self):
+        super().__post_init__()
+
+        # Pre-compute trajectory boundaries (from GCDataset logic)
+        # Note: self.dataset is the underlying flat dataset
+        (self.terminal_locs,) = np.nonzero(self.dataset["terminals"] > 0)
+        self.initial_locs = np.concatenate([[0], self.terminal_locs[:-1] + 1])
+
+        # Validate config for goal sampling
+        assert np.isclose(
+            self.config["actor_p_curgoal"]
+            + self.config["actor_p_trajgoal"]
+            + self.config["actor_p_randomgoal"],
+            1.0,
+        )
+
+    def sample(self, batch_size: int):
+        """
+        Sample trajectories with goals.
+        """
+        # 1. Sample Trajectories (using parent logic)
+        # We need indices to perform goal sampling relative to the trajectory start/end
+        rand_indices = np.random.randint(len(self.indices), size=batch_size)
+        batch_indices = self.indices[rand_indices]  # (path_ind, start, end)
+
+        batch_dict = self._get_batch_from_indices(batch_indices)
+
+        # 2. Sample Goals (Hindsight Relabeling)
+        # We need 'idxs' corresponding to the *start* of the trajectory for goal sampling logic
+        # But wait, GCDataset.sample_goals expects 'idxs' to be indices in the flat dataset.
+        # Our batch_indices contains (path_ind, start, end).
+        # We need to convert (path_ind, start) to flat_idx.
+
+        # To do this efficiently, we need a mapping or calculation.
+        # Since we have path_lengths, we can compute start_indices of each episode.
+        # Let's pre-compute episode start indices in __post_init__ if not already available.
+        # Actually self.initial_locs has exactly this!
+
+        path_inds = batch_indices[:, 0]
+        starts = batch_indices[:, 1]
+
+        # flat_idxs corresponding to the first step of the sampled trajectory
+        flat_idxs = self.initial_locs[path_inds] + starts
+
+        # Now we can use the logic from GCDataset.sample_goals
+        # But we can't call it directly because it's an instance method of GCDataset.
+        # We'll copy the logic or refactor. Copying is safer to avoid modifying GCDataset.
+
+        actor_goal_idxs = self._sample_goals(
+            flat_idxs,
+            self.config["actor_p_curgoal"],
+            self.config["actor_p_trajgoal"],
+            self.config["actor_p_randomgoal"],
+            self.config["actor_geom_sample"],
+        )
+
+        # Fetch goal observations
+        # self.dataset['observations'] is the flat observations array
+        batch_dict["actor_goals"] = self.dataset["observations"][actor_goal_idxs]
+
+        # Add compatibility keys
+        batch_dict["observations"] = batch_dict["trajectories"]
+        batch_dict["actions"] = batch_dict["trajectories"][:, :, : self.action_dim]
+
+        return batch_dict
+
+    def _sample_goals(self, idxs, p_curgoal, p_trajgoal, p_randomgoal, geom_sample):
+        """Sample goals for the given indices (Copied from GCDataset)."""
+        batch_size = len(idxs)
+
+        # Random goals.
+        # self.dataset.get_random_idxs() uses self.valid_idxs if available
+        # We can just use random int over size since we don't have valid_idxs setup exactly like GCDataset
+        # But let's try to use self.dataset.get_random_idxs if possible
+        random_goal_idxs = self.dataset.get_random_idxs(batch_size)
+
+        # Goals from the same trajectory
+        # We need terminal locations.
+        final_state_idxs = self.terminal_locs[np.searchsorted(self.terminal_locs, idxs)]
+
+        if geom_sample:
+            # Geometric sampling.
+            offsets = np.random.geometric(
+                p=1 - self.config["discount"], size=batch_size
+            )  # in [1, inf)
+            traj_goal_idxs = np.minimum(idxs + offsets, final_state_idxs)
+        else:
+            # Uniform sampling.
+            distances = np.random.rand(batch_size)  # in [0, 1)
+            traj_goal_idxs = np.round(
+                (
+                    np.minimum(idxs + 1, final_state_idxs) * distances
+                    + final_state_idxs * (1 - distances)
+                )
+            ).astype(int)
+
+        if p_curgoal == 1.0:
+            goal_idxs = idxs
+        else:
+            goal_idxs = np.where(
+                np.random.rand(batch_size) < p_trajgoal / (1.0 - p_curgoal),
+                traj_goal_idxs,
+                random_goal_idxs,
+            )
+
+            # Goals at the current state.
+            goal_idxs = np.where(
+                np.random.rand(batch_size) < p_curgoal, idxs, goal_idxs
+            )
+
+        return goal_idxs
