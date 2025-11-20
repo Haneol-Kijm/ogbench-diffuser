@@ -639,7 +639,7 @@ class DiffuserSequenceDataset:
         batch_dict = self._get_batch_from_indices(batch_indices)
 
         # --- 🔻 [수정] main.py 호환성을 위해 키 추가 🔻 ---
-        batch_dict["observations"] = batch_dict["trajectories"]
+        batch_dict["observations"] = batch_dict["trajectories"][:, :, self.action_dim :]
         batch_dict["actions"] = batch_dict["trajectories"][:, :, : self.action_dim]
         # --- 🔺 [수정 완료] 🔺 ---
 
@@ -697,7 +697,7 @@ class DiffuserValueDataset(DiffuserSequenceDataset):
 
         # --- 🔻 [수정] main.py 호환성을 위해 키 추가 🔻 ---
         # Diffuser 에이전트의 create는 ex_observations로 (B, H, A+O) 궤적을 사용
-        batch_dict["observations"] = batch_dict["trajectories"]
+        batch_dict["observations"] = batch_dict["trajectories"][:, :, self.action_dim :]
 
         # ex_actions로 (B, H, A) 액션 부분을 사용
         # (self.action_dim은 부모 클래스의 __post_init__에서 설정됨)
@@ -776,7 +776,7 @@ class GCDiffuserSequenceDataset(DiffuserSequenceDataset):
         batch_dict["actor_goals"] = self.dataset["observations"][actor_goal_idxs]
 
         # Add compatibility keys
-        batch_dict["observations"] = batch_dict["trajectories"]
+        batch_dict["observations"] = batch_dict["trajectories"][:, :, self.action_dim :]
         batch_dict["actions"] = batch_dict["trajectories"][:, :, : self.action_dim]
 
         return batch_dict
