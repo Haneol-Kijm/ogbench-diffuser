@@ -279,7 +279,7 @@ class HIQLFMAgent(flax.struct.PyTreeNode):
         condition = jnp.concatenate([observations, goals], axis=-1)
 
         # 3. Euler Loop
-        steps = 10  # Hardcoded for now, can be in config
+        steps = 10  # TODO: Hardcoded for now, can be in config
         dt = 1.0 / steps
 
         def scan_fn(carry, t):
@@ -415,7 +415,7 @@ class HIQLFMAgent(flax.struct.PyTreeNode):
 
         # --- Flow Actor Definition ---
         high_actor_def = FlowActor(
-            hidden_dim=256,  # Configurable?
+            hidden_dim=256,  # TODO: Configurable?
             num_blocks=3,
             out_dim=config["rep_dim"],
             dropout_rate=0.1,
