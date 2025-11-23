@@ -7,6 +7,7 @@ from agents.gcbc import GCBCAgent
 from agents.gciql import GCIQLAgent
 from agents.gcivl import GCIVLAgent
 from agents.hiql import HIQLAgent
+from agents.hiql_fm import HIQLFMAgent
 from agents.qrl import QRLAgent
 from agents.sac import SACAgent
 
@@ -16,6 +17,7 @@ agents = dict(
     gciql=GCIQLAgent,
     gcivl=GCIVLAgent,
     hiql=HIQLAgent,
+    hiql_fm=HIQLFMAgent,
     qrl=QRLAgent,
     sac=SACAgent,
     diffuser_value=DiffuserValueAgent,
