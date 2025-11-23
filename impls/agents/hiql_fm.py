@@ -33,7 +33,14 @@ class HIQLFMAgent(flax.struct.PyTreeNode):
         return weight * (diff**2)
 
     def value_loss(self, batch, grad_params):
-        """Compute the IVL value loss."""
+        """Compute the IVL value loss.
+
+        This value loss is similar to the original IQL value loss, but involves additional tricks to stabilize training.
+        For example, when computing the expectile loss, we separate the advantage part (which is used to compute the
+        weight) and the difference part (which is used to compute the loss), where we use the target value function to
+        compute the former and the current value function to compute the latter. This is similar to how double DQN
+        mitigates overestimation bias.
+        """
         (next_v1_t, next_v2_t) = self.network.select("target_value")(
             batch["next_observations"], batch["value_goals"]
         )
@@ -175,10 +182,29 @@ class HIQLFMAgent(flax.struct.PyTreeNode):
         # Loss = weight * || v_pred - u_t ||^2
         loss = jnp.mean(exp_a * jnp.square(v_pred - u_t))
 
+        # Additional Monitoring Metrics
+        v_pred_norm = jnp.linalg.norm(v_pred, axis=-1).mean()
+        u_t_norm = jnp.linalg.norm(u_t, axis=-1).mean()
+        weights_mean = exp_a.mean()
+        weights_max = exp_a.max()
+
+        # Cosine Similarity
+        v_pred_flat = v_pred.reshape(v_pred.shape[0], -1)
+        u_t_flat = u_t.reshape(u_t.shape[0], -1)
+        cos_sim = jnp.sum(v_pred_flat * u_t_flat, axis=-1) / (
+            jnp.linalg.norm(v_pred_flat, axis=-1) * jnp.linalg.norm(u_t_flat, axis=-1)
+            + 1e-6
+        )
+
         return loss, {
             "actor_loss": loss,
             "adv": adv.mean(),
             "flow_mse": jnp.mean(jnp.square(v_pred - u_t)),
+            "weight/mean": weights_mean,
+            "weight/max": weights_max,
+            "velocity/pred_norm": v_pred_norm,
+            "velocity/target_norm": u_t_norm,
+            "velocity/cos_sim": cos_sim.mean(),
         }
 
     @jax.jit
@@ -298,7 +324,14 @@ class HIQLFMAgent(flax.struct.PyTreeNode):
         ex_actions,
         config,
     ):
-        """Create a new agent."""
+        """Create a new agent.
+
+        Args:
+            seed: Random seed.
+            ex_observations: Example batch of observations.
+            ex_actions: Example batch of actions. In discrete-action MDPs, this should contain the maximum action value.
+            config: Configuration dictionary.
+        """
         rng = jax.random.PRNGKey(seed)
         rng, init_rng = jax.random.split(rng, 2)
 
