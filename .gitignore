@@ -12,3 +12,5 @@ dist/
 impls/save/
 exp/
 impls/save_eval/
+visualizations/
+wandb/
