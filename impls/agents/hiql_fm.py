@@ -180,7 +180,7 @@ class HIQLFMAgent(flax.struct.PyTreeNode):
 
         # 4. Compute Weighted MSE Loss
         # Loss = weight * || v_pred - u_t ||^2
-        loss = jnp.mean(exp_a * jnp.square(v_pred - u_t))
+        loss = jnp.mean(exp_a[:, None] * jnp.square(v_pred - u_t))
 
         # Additional Monitoring Metrics
         v_pred_norm = jnp.linalg.norm(v_pred, axis=-1).mean()
@@ -266,6 +266,17 @@ class HIQLFMAgent(flax.struct.PyTreeNode):
         It first queries the high-level flow actor to obtain subgoal representations, and then queries the low-level actor
         to obtain raw actions.
         """
+        observations = jnp.asarray(observations)
+        if goals is not None:
+            goals = jnp.asarray(goals)
+
+        is_unbatched = False
+        if observations.ndim == 1:
+            is_unbatched = True
+            observations = observations[None, :]
+            if goals is not None:
+                goals = goals[None, :]
+
         high_seed, low_seed = jax.random.split(seed)
 
         # --- High-Level Flow Sampling (Euler ODE) ---
@@ -314,6 +325,10 @@ class HIQLFMAgent(flax.struct.PyTreeNode):
 
         if not self.config["discrete"]:
             actions = jnp.clip(actions, -1, 1)
+
+        if is_unbatched:
+            actions = actions[0]
+
         return actions
 
     @classmethod
