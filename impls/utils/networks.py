@@ -1554,10 +1554,13 @@ class TransformerFlow(nn.Module):
 
         return x_out
 
-# --- IDQL Ported Networks ---
 
+#################################################################################
+#                IDQL Ported Networks                                           #
+#################################################################################
 class MLPResNetBlock(nn.Module):
     """MLPResNet block."""
+
     features: int
     act: Any
     dropout_rate: float = None
@@ -1567,8 +1570,7 @@ class MLPResNetBlock(nn.Module):
     def __call__(self, x, training: bool = False):
         residual = x
         if self.dropout_rate is not None and self.dropout_rate > 0.0:
-            x = nn.Dropout(rate=self.dropout_rate)(
-                x, deterministic=not training)
+            x = nn.Dropout(rate=self.dropout_rate)(x, deterministic=not training)
         if self.use_layer_norm:
             x = nn.LayerNorm()(x)
         x = nn.Dense(self.features * 4)(x)
@@ -1579,6 +1581,7 @@ class MLPResNetBlock(nn.Module):
             residual = nn.Dense(self.features)(residual)
 
         return residual + x
+
 
 class MLPResNet(nn.Module):
     num_blocks: int
@@ -1592,11 +1595,17 @@ class MLPResNet(nn.Module):
     def __call__(self, x: jnp.ndarray, training: bool = False) -> jnp.ndarray:
         x = nn.Dense(self.hidden_dim, kernel_init=default_init())(x)
         for _ in range(self.num_blocks):
-            x = MLPResNetBlock(self.hidden_dim, act=self.activations, use_layer_norm=self.use_layer_norm, dropout_rate=self.dropout_rate)(x, training=training)
-            
+            x = MLPResNetBlock(
+                self.hidden_dim,
+                act=self.activations,
+                use_layer_norm=self.use_layer_norm,
+                dropout_rate=self.dropout_rate,
+            )(x, training=training)
+
         x = self.activations(x)
         x = nn.Dense(self.out_dim, kernel_init=default_init())(x)
         return x
+
 
 class FourierFeatures(nn.Module):
     output_size: int
@@ -1605,8 +1614,12 @@ class FourierFeatures(nn.Module):
     @nn.compact
     def __call__(self, x: jnp.ndarray):
         if self.learnable:
-            w = self.param('kernel', nn.initializers.normal(0.2),
-                           (self.output_size // 2, x.shape[-1]), jnp.float32)
+            w = self.param(
+                "kernel",
+                nn.initializers.normal(0.2),
+                (self.output_size // 2, x.shape[-1]),
+                jnp.float32,
+            )
             f = 2 * jnp.pi * x @ w.T
         else:
             half_dim = self.output_size // 2
@@ -1615,15 +1628,26 @@ class FourierFeatures(nn.Module):
             f = x * f
         return jnp.concatenate([jnp.cos(f), jnp.sin(f)], axis=-1)
 
+
 class FlowActor(nn.Module):
     """Flow-Matching Actor using MLPResNet."""
+
     hidden_dim: int = 256
     num_blocks: int = 3
     out_dim: int = 2  # Subgoal dimension
     dropout_rate: float = 0.1
     use_layer_norm: bool = False
 
-    @nn.compact
+    def setup(self):
+        self.time_emb = FourierFeatures(output_size=self.hidden_dim)
+        self.net = MLPResNet(
+            num_blocks=self.num_blocks,
+            out_dim=self.out_dim,
+            hidden_dim=self.hidden_dim,
+            dropout_rate=self.dropout_rate,
+            use_layer_norm=self.use_layer_norm,
+        )
+
     def __call__(self, x, time, condition, training: bool = False):
         """
         Args:
@@ -1638,19 +1662,13 @@ class FlowActor(nn.Module):
             time = time[:, None]
 
         # Embed time
-        t_emb = FourierFeatures(output_size=self.hidden_dim)(time)
+        t_emb = self.time_emb(time)
 
         # Concatenate inputs
         # x: (B, D), t_emb: (B, H), condition: (B, C)
         h = jnp.concatenate([x, t_emb, condition], axis=-1)
 
         # Pass through ResNet
-        output = MLPResNet(
-            num_blocks=self.num_blocks,
-            out_dim=self.out_dim,
-            hidden_dim=self.hidden_dim,
-            dropout_rate=self.dropout_rate,
-            use_layer_norm=self.use_layer_norm
-        )(h, training=training)
+        output = self.net(h, training=training)
 
         return output
