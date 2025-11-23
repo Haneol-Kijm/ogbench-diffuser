@@ -14,13 +14,40 @@ from utils.networks import TransformerFlow
 # ==============================================================================
 
 
-def apply_conditioning(x, conditions, action_dim):
+def apply_conditioning(x, conditions, action_dim, state_dim=None):
     """
     x: (B, T, C)
     conditions: {t: obs_t, ...} 딕셔너리
+
+    만약 state_dim이 주어지고, conditions의 값이 (state_dim + goal_dim)보다 작다면?
+    -> Goal만 업데이트하는 로직이 필요함.
+
+    하지만 더 간단하게:
+    conditions 딕셔너리의 값이 '전체(State+Goal)'일 수도 있고, 'Goal만'일 수도 있음.
+    이를 구분하기 위해 conditions의 키를 (t, type)으로 하거나,
+    값의 shape를 보고 판단?
+
+    가장 확실한 방법:
+    conditions = {
+        (t, 'full'): val,  # State + Goal 전체 교체
+        (t, 'goal'): val   # Goal 부분만 교체
+    }
     """
-    for t, val in conditions.items():
-        x = x.at[:, t, action_dim:].set(val)
+    for key, val in conditions.items():
+        if isinstance(key, tuple):
+            t, type_ = key
+        else:
+            t, type_ = key, "full"
+
+        if type_ == "full":
+            # 기존 로직: Action 뒤의 모든 것을 교체 (State + Goal)
+            x = x.at[:, t, action_dim:].set(val)
+        elif type_ == "goal":
+            # Goal만 교체: Action + State 뒤의 모든 것을 교체
+            # 이를 위해서는 state_dim이 필수
+            assert state_dim is not None
+            x = x.at[:, t, action_dim + state_dim :].set(val)
+
     return x
 
 
@@ -238,7 +265,23 @@ class FlowBCAgent(struct.PyTreeNode):
 
             v_pred = self.state(x, t_batch, deterministic=True)
             x_next = x + v_pred * dt
-            x_next = apply_conditioning(x_next, conditions, ActDim)
+
+            # state_dim 계산 (TotalDim - ActDim - GoalDim?)
+            # GoalDim을 모르지만, conditions에서 유추하거나 인자로 받아야 함.
+            # sample 함수에 state_dim 인자 추가 필요.
+            # 하지만 sample() 시그니처 바꾸기 번거로우니, 여기서 계산.
+            # conditions의 첫 번째 값의 shape를 보면 됨.
+            # 하지만 conditions가 이제 (t, type) 키를 가질 수 있음.
+
+            # sample() 호출 시 state_dim을 계산해서 넘겨주는 게 깔끔함.
+            # 여기서는 ActDim, ObsDim(State+Goal)을 알고 있음.
+            # 하지만 StateDim과 GoalDim을 분리해야 함.
+            # ObsDim = StateDim + GoalDim.
+            # 보통 StateDim == GoalDim (OGBench).
+            # 따라서 StateDim = ObsDim // 2.
+
+            state_dim = ObsDim // 2
+            x_next = apply_conditioning(x_next, conditions, ActDim, state_dim)
 
             return x_next, None
 
@@ -272,7 +315,34 @@ class FlowBCAgent(struct.PyTreeNode):
 
             observations = jnp.concatenate([observations, goals], axis=-1)
 
-        conditions = {0: observations}
+        # [Global Goal Conditioning Fix]
+        # 1. t=0: State + Goal 모두 고정 (Start Inpainting)
+        conditions = {(0, "full"): observations}
+
+        if goals is not None:
+            # 2. t=1...H-1: Goal만 고정 (Goal Inpainting)
+            # goals: (B, G) -> (B, 1, G) -> Tile to (B, H-1, G) -> Loop set?
+            # 딕셔너리에 하나씩 넣어야 함.
+
+            # goals shape: (B, G) (이미 위에서 broadcast 안 된 상태로 가정?
+            # 아까 위에서 observations = concat([obs, goals]) 했음.
+            # goals 변수는 여전히 (B, G) 또는 (B, 1, G) 상태임.
+
+            # 위에서 goals 차원 처리를 했음:
+            # if goals.ndim == 1: goals = goals[None, ...]
+            # if goals.ndim == 1: goals = goals[None, ...] (중복)
+
+            # goals는 (B, G) 형태여야 함.
+            # 만약 (B, 1, G)라면 squeeze 필요.
+            if goals.ndim == 3:
+                goals_cond = goals[:, 0, :]  # (B, G)
+            else:
+                goals_cond = goals  # (B, G)
+
+            for t in range(1, self.horizon):
+                conditions[(t, "goal")] = goals_cond
+
+        actions = self.sample(conditions, seed=seed, nfe=32)
 
         actions = self.sample(conditions, seed=seed, nfe=32)
 
