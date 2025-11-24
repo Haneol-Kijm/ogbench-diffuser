@@ -7,7 +7,6 @@ from collections import defaultdict
 import jax
 import numpy as np
 import tqdm
-import wandb
 from absl import app, flags
 from agents import agents
 from ml_collections import config_flags
@@ -29,6 +28,8 @@ from utils.log_utils import (
     get_wandb_video,
     setup_wandb,
 )
+
+import wandb
 
 FLAGS = flags.FLAGS
 
