@@ -331,6 +331,57 @@ class HIQLFMAgent(flax.struct.PyTreeNode):
 
         return actions
 
+    @jax.jit
+    def sample_high_actions(self, observations, goals, seed):
+        """Sample high-level actions (subgoal representations) from the high-level flow actor."""
+        observations = jnp.asarray(observations)
+        if goals is not None:
+            goals = jnp.asarray(goals)
+
+        is_unbatched = False
+        if observations.ndim == 1:
+            is_unbatched = True
+            observations = observations[None, :]
+            if goals is not None:
+                goals = goals[None, :]
+
+        batch_size = observations.shape[0]
+        rep_dim = self.config["rep_dim"]
+
+        # 1. Start from Noise x_0
+        x = jax.random.normal(seed, (batch_size, rep_dim))
+
+        # 2. Condition
+        condition = jnp.concatenate([observations, goals], axis=-1)
+
+        # 3. Euler Loop
+        steps = 10
+        dt = 1.0 / steps
+
+        def scan_fn(carry, t):
+            x = carry
+            # Broadcast t to batch
+            t_batch = jnp.full((batch_size, 1), t)
+
+            v = self.network.select("high_actor")(x, t_batch, condition)
+            x_next = x + v * dt
+            return x_next, None
+
+        t_values = jnp.linspace(0, 1.0, steps, endpoint=False)
+        goal_reps, _ = jax.lax.scan(scan_fn, x, t_values)
+
+        # Normalize
+        goal_reps = (
+            goal_reps
+            / jnp.linalg.norm(goal_reps, axis=-1, keepdims=True)
+            * jnp.sqrt(goal_reps.shape[-1])
+        )
+
+        if is_unbatched:
+            goal_reps = goal_reps[0]
+
+        return goal_reps
+
     @classmethod
     def create(
         cls,
