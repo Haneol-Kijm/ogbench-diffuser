@@ -56,7 +56,29 @@ def get_candidate_states(env, density=2.0):
     return np.array(valid_candidates), (XX, YY)
 
 
-def visualize_vector_field(env_name, checkpoints):
+PRESETS = {
+    "large": {
+        "env_name": "pointmaze-large-navigate-v0",
+        "tasks": [2, 5],
+        "checkpoints": {
+            "HIQL": "/home/haneol/ogbench-diffuser/impls/exp/OGBench/Benchmark/sd000_20251124_001204/params_1000000.pkl",
+            "HIQL-FM": "/home/haneol/ogbench-diffuser/impls/exp/OGBench/hiql_fm_test/sd000_20251123_212547/params_1000000.pkl",
+        },
+        "output": "vector_field_comparison.png",
+    },
+    "giant": {
+        "env_name": "pointmaze-giant-navigate-v0",
+        "tasks": [1, 3],
+        "checkpoints": {
+            "HIQL": "/home/haneol/ogbench-diffuser/impls/exp/OGBench/Benchmark/sd000_20251122_175241/params_1000000.pkl",
+            "HIQL-FM": "/home/haneol/ogbench-diffuser/impls/exp/OGBench/hiql_fm_test/sd000_20251124_065117/params_1000000.pkl",
+        },
+        "output": "vector_field_giant_comparison.png",
+    },
+}
+
+
+def visualize_vector_field(env_name, checkpoints, tasks, output_name, crop=None):
     # 1. Load Environment
     print(f"Loading environment: {env_name}")
     env = ogbench.make_env_and_datasets(env_name, env_only=True)
@@ -111,7 +133,6 @@ def visualize_vector_field(env_name, checkpoints):
     print(f"Generated {len(dense_candidates)} candidate states for heatmap.")
 
     # 4. Visualization Loop
-    tasks = [2, 5]  # Task IDs to visualize
     fig, axes = plt.subplots(len(tasks), len(agents), figsize=(15, 15), dpi=150)
 
     # Maze info for plotting
@@ -143,46 +164,49 @@ def visualize_vector_field(env_name, checkpoints):
             # Compute Values
             values = get_values(agent, obs_batch, goal_batch)
 
+            # Filter for Crop (Heatmap)
+            plot_dense_candidates = dense_candidates
+            plot_values = values
+
+            if crop:
+                x_min, x_max, y_min, y_max = crop
+                mask = (
+                    (dense_candidates[:, 0] >= x_min)
+                    & (dense_candidates[:, 0] <= x_max)
+                    & (dense_candidates[:, 1] >= y_min)
+                    & (dense_candidates[:, 1] <= y_max)
+                )
+                plot_dense_candidates = dense_candidates[mask]
+                plot_values = values[mask]
+
             # Interpolate for heatmap
             cntr = ax.tricontourf(
-                dense_candidates[:, 0],
-                dense_candidates[:, 1],
-                values,
+                plot_dense_candidates[:, 0],
+                plot_dense_candidates[:, 1],
+                plot_values,
                 levels=20,
                 cmap="viridis",
                 alpha=0.6,
             )
 
-            # --- B. Vector Field (Streamplot) ---
-            # We need U, V on the regular grid XX, YY.
-            # XX, YY contains all points (including walls).
-            # We need to compute vectors for all points in XX, YY, or interpolate.
-            # Let's compute for all points in XX, YY to avoid interpolation artifacts near walls.
+            # --- B. Vector Field (Quiver) ---
+            # Revert to Quiver as requested, with better styling.
+            # We use the 'candidates' grid which is already filtered for valid points.
 
-            grid_points = np.stack([XX.flatten(), YY.flatten()], axis=1)
-
-            # Filter out points clearly inside walls to save compute?
-            # Actually, streamplot handles masked arrays.
-            # Let's compute for all, then mask.
-
-            # Batching for grid points
-            obs_batch = jnp.array(grid_points)
-            goal_batch = jnp.tile(goal_rep, (len(grid_points), 1))
+            obs_batch = jnp.array(candidates)
+            goal_batch = jnp.tile(goal_rep, (len(candidates), 1))
 
             # Sample Latent Subgoals
             rng = jax.random.PRNGKey(42)
-            # This might be large (N*M).
-            # Let's do it in chunks if needed.
             target_reps = agent.sample_high_actions(obs_batch, goal_batch, seed=rng)
 
             # Retrieve Nearest Physical Subgoals
-            # Use valid candidates for retrieval (we only want to retrieve valid subgoals)
             retrieval_candidates = candidates
 
             vectors = []
-            chunk_size = 500  # Larger chunk size
+            chunk_size = 50  # Reduced chunk size to prevent OOM
 
-            for i in range(0, len(grid_points), chunk_size):
+            for i in range(0, len(candidates), chunk_size):
                 s_chunk = obs_batch[i : i + chunk_size]
                 z_chunk = target_reps[i : i + chunk_size]
 
@@ -208,38 +232,43 @@ def visualize_vector_field(env_name, checkpoints):
 
             vectors = np.concatenate(vectors, axis=0)
 
-            U = vectors[:, 0].reshape(XX.shape)
-            V = vectors[:, 1].reshape(YY.shape)
+            # Filter for Crop (Vector Field)
+            plot_candidates = candidates
+            plot_vectors = vectors
 
-            # Mask U, V where map is wall
-            # Map coordinate to grid index
-            # XX[i, j] -> x, y -> map_i, map_j
-            # We can iterate and mask.
-            mask = np.zeros_like(U, dtype=bool)
-            for i in range(XX.shape[0]):
-                for j in range(XX.shape[1]):
-                    x, y = XX[i, j], YY[i, j]
-                    mi = int(round((y + offset_y) / maze_unit))
-                    mj = int(round((x + offset_x) / maze_unit))
-                    if 0 <= mi < height and 0 <= mj < width:
-                        if maze_map[mi, mj] == 1:
-                            mask[i, j] = True
-                    else:
-                        mask[i, j] = True
+            if crop:
+                x_min, x_max, y_min, y_max = crop
+                mask = (
+                    (candidates[:, 0] >= x_min)
+                    & (candidates[:, 0] <= x_max)
+                    & (candidates[:, 1] >= y_min)
+                    & (candidates[:, 1] <= y_max)
+                )
+                plot_candidates = candidates[mask]
+                plot_vectors = vectors[mask]
 
-            U = np.ma.array(U, mask=mask)
-            V = np.ma.array(V, mask=mask)
-
-            # Streamplot
-            # density=1.5 -> higher density of lines
-            # color='black' -> clear visibility
-            # linewidth=1 -> standard width
-            # arrowsize=1 -> standard arrow size
-            ax.streamplot(
-                XX, YY, U, V, color="black", density=1.5, linewidth=1, arrowsize=1
+            # Quiver Plot
+            # zorder=10 (Top)
+            # small head, thin body
+            ax.quiver(
+                plot_candidates[:, 0],
+                plot_candidates[:, 1],
+                plot_vectors[:, 0],
+                plot_vectors[:, 1],
+                color="white",
+                scale=None,
+                scale_units="xy",
+                angles="xy",
+                headwidth=3,  # Smaller head
+                headlength=4,
+                headaxislength=3.5,
+                width=0.002,  # Thinner body
+                zorder=10,
             )
 
-            # --- C. Plot Maze Walls (Light Gray) ---
+            # --- C. Plot Maze Walls ---
+            # zorder=1 (Middle, above heatmap, below quiver)
+            # alpha=0.4 (Semi-transparent)
             for i in range(height):
                 for j in range(width):
                     if maze_map[i, j] == 1:
@@ -248,21 +277,12 @@ def visualize_vector_field(env_name, checkpoints):
                             (cx - maze_unit / 2, cy - maze_unit / 2),
                             maze_unit,
                             maze_unit,
-                            color="lightgray",
-                            zorder=5,  # Below start/goal, above heatmap
+                            facecolor="lightgray",
+                            edgecolor="gray",
+                            alpha=0.4,
+                            zorder=1,
                         )
                         ax.add_patch(rect)
-                        # Add border for better definition
-                        rect_border = plt.Rectangle(
-                            (cx - maze_unit / 2, cy - maze_unit / 2),
-                            maze_unit,
-                            maze_unit,
-                            fill=False,
-                            edgecolor="gray",
-                            linewidth=0.5,
-                            zorder=5,
-                        )
-                        ax.add_patch(rect_border)
 
             # --- D. Mark Start and Goal ---
             ax.scatter(
@@ -273,7 +293,7 @@ def visualize_vector_field(env_name, checkpoints):
                 marker="o",
                 edgecolors="black",
                 label="Start",
-                zorder=10,
+                zorder=20,
             )
             ax.scatter(
                 goal_xy[0],
@@ -283,14 +303,22 @@ def visualize_vector_field(env_name, checkpoints):
                 marker="*",
                 edgecolors="black",
                 label="Goal",
-                zorder=10,
+                zorder=20,
             )
 
             ax.set_title(f"{agent_name} - Task {task_id}", fontsize=14)
-            ax.set_xlim(-offset_x - maze_unit, width * maze_unit - offset_x + maze_unit)
-            ax.set_ylim(
-                -offset_y - maze_unit, height * maze_unit - offset_y + maze_unit
-            )
+
+            if crop:
+                ax.set_xlim(crop[0], crop[1])
+                ax.set_ylim(crop[2], crop[3])
+            else:
+                ax.set_xlim(
+                    -offset_x - maze_unit, width * maze_unit - offset_x + maze_unit
+                )
+                ax.set_ylim(
+                    -offset_y - maze_unit, height * maze_unit - offset_y + maze_unit
+                )
+
             ax.set_aspect("equal")
             if row_idx == 0 and col_idx == 0:
                 ax.legend(loc="upper right")
@@ -298,14 +326,54 @@ def visualize_vector_field(env_name, checkpoints):
     plt.tight_layout()
     save_dir = "impls/visualizations"
     os.makedirs(save_dir, exist_ok=True)
-    save_path = os.path.join(save_dir, "vector_field_comparison.png")
+    save_path = os.path.join(save_dir, output_name)
     plt.savefig(save_path)
     print(f"Visualization saved to {save_path}")
 
 
 if __name__ == "__main__":
-    checkpoints = {
-        "HIQL": "/home/haneol/ogbench-diffuser/impls/exp/OGBench/Benchmark/sd000_20251124_001204/params_1000000.pkl",
-        "HIQL-FM": "/home/haneol/ogbench-diffuser/impls/exp/OGBench/hiql_fm_test/sd000_20251123_212547/params_1000000.pkl",
-    }
-    visualize_vector_field("pointmaze-large-navigate-v0", checkpoints)
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--preset",
+        type=str,
+        default="large",
+        choices=["large", "giant"],
+        help="Configuration preset",
+    )
+    parser.add_argument("--env_name", type=str, help="Override environment name")
+    parser.add_argument(
+        "--tasks", type=int, nargs="+", help="Override task IDs (e.g. --tasks 2 5)"
+    )
+    parser.add_argument("--ckpt_hiql", type=str, help="Override HIQL checkpoint path")
+    parser.add_argument(
+        "--ckpt_hiql_fm", type=str, help="Override HIQL-FM checkpoint path"
+    )
+    parser.add_argument("--output", type=str, help="Override output filename")
+    parser.add_argument(
+        "--crop", type=float, nargs=4, help="Crop region: x_min x_max y_min y_max"
+    )
+
+    args = parser.parse_args()
+
+    # 1. Load Preset
+    config = PRESETS[args.preset].copy()
+
+    # 2. Apply Overrides
+    if args.env_name:
+        config["env_name"] = args.env_name
+    if args.tasks:
+        config["tasks"] = args.tasks
+    if args.ckpt_hiql:
+        config["checkpoints"]["HIQL"] = args.ckpt_hiql
+    if args.ckpt_hiql_fm:
+        config["checkpoints"]["HIQL-FM"] = args.ckpt_hiql_fm
+    if args.output:
+        config["output"] = args.output
+
+    visualize_vector_field(
+        config["env_name"],
+        config["checkpoints"],
+        config["tasks"],
+        config["output"],
+        crop=args.crop,
+    )
