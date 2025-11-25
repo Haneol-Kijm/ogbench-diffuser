@@ -78,7 +78,9 @@ PRESETS = {
 }
 
 
-def visualize_vector_field(env_name, checkpoints, tasks, output_name, crop=None):
+def visualize_vector_field(
+    env_name, checkpoints, tasks, output_name, crop=None, agent_names=None
+):
     # 1. Load Environment
     print(f"Loading environment: {env_name}")
     env = ogbench.make_env_and_datasets(env_name, env_only=True)
@@ -100,7 +102,12 @@ def visualize_vector_field(env_name, checkpoints, tasks, output_name, crop=None)
     ex_ob = jnp.array(ex_ob[None])
     ex_action = jnp.array(ex_action[None])
 
-    for name, path in checkpoints.items():
+    # Filter checkpoints based on agent_names if provided
+    target_checkpoints = checkpoints
+    if agent_names:
+        target_checkpoints = {k: v for k, v in checkpoints.items() if k in agent_names}
+
+    for name, path in target_checkpoints.items():
         print(f"Loading {name} Agent from {path}...")
         config = configs[name]
         config.hidden_dims = (256, 256, 256)  # Ensure hidden dims match training
@@ -119,6 +126,10 @@ def visualize_vector_field(env_name, checkpoints, tasks, output_name, crop=None)
             print(f"Failed to restore {name}: {e}")
             return
 
+    if not agents:
+        print("No agents loaded. Exiting.")
+        return
+
     # 3. Prepare Grid for Visualization
     # For streamplot, we need a regular grid.
     # get_candidate_states returns valid points, but we need the full meshgrid for interpolation/streamplot.
@@ -133,7 +144,17 @@ def visualize_vector_field(env_name, checkpoints, tasks, output_name, crop=None)
     print(f"Generated {len(dense_candidates)} candidate states for heatmap.")
 
     # 4. Visualization Loop
-    fig, axes = plt.subplots(len(tasks), len(agents), figsize=(15, 15), dpi=150)
+    nrows = len(tasks)
+    ncols = len(agents)
+    fig, axes = plt.subplots(nrows, ncols, figsize=(6 * ncols, 6 * nrows), dpi=150)
+
+    # Ensure axes is always a 2D array for consistent indexing
+    if nrows == 1 and ncols == 1:
+        axes = np.array([[axes]])
+    elif nrows == 1:
+        axes = axes[np.newaxis, :]
+    elif ncols == 1:
+        axes = axes[:, np.newaxis]
 
     # Maze info for plotting
     maze_map = env.unwrapped.maze_map
@@ -188,6 +209,10 @@ def visualize_vector_field(env_name, checkpoints, tasks, output_name, crop=None)
                 cmap="viridis",
                 alpha=0.6,
             )
+
+            # Add Colorbar if single plot
+            if nrows * ncols == 1:
+                fig.colorbar(cntr, ax=ax, label="Value")
 
             # --- B. Vector Field (Quiver) ---
             # Revert to Quiver as requested, with better styling.
@@ -352,6 +377,9 @@ if __name__ == "__main__":
     parser.add_argument(
         "--crop", type=float, nargs=4, help="Crop region: x_min x_max y_min y_max"
     )
+    parser.add_argument(
+        "--agents", type=str, nargs="+", help="Select specific agents to visualize"
+    )
 
     args = parser.parse_args()
 
@@ -376,4 +404,5 @@ if __name__ == "__main__":
         config["tasks"],
         config["output"],
         crop=args.crop,
+        agent_names=args.agents,
     )
