@@ -10,6 +10,7 @@ from agents.hiql import HIQLAgent
 from agents.hiql import get_config as get_hiql_config
 from agents.hiql_fm import HIQLFMAgent
 from agents.hiql_fm import get_config as get_hiql_fm_config
+from matplotlib.animation import FuncAnimation, PillowWriter
 from utils.flax_utils import restore_agent
 
 sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
@@ -79,7 +80,15 @@ PRESETS = {
 
 
 def visualize_vector_field(
-    env_name, checkpoints, tasks, output_name, crop=None, agent_names=None
+    env_name,
+    checkpoints,
+    tasks,
+    output_name,
+    crop=None,
+    agent_names=None,
+    query_points=None,
+    num_samples=20,
+    animate=False,
 ):
     # 1. Load Environment
     print(f"Loading environment: {env_name}")
@@ -131,10 +140,6 @@ def visualize_vector_field(
         return
 
     # 3. Prepare Grid for Visualization
-    # For streamplot, we need a regular grid.
-    # get_candidate_states returns valid points, but we need the full meshgrid for interpolation/streamplot.
-    # Let's use get_candidate_states to get the bounds and valid mask, but we'll create a regular grid for streamplot.
-
     density = 2.0
     candidates, (XX, YY) = get_candidate_states(env, density=density)
     print(f"Generated {len(candidates)} candidate states for vector field.")
@@ -142,6 +147,20 @@ def visualize_vector_field(
     # Dense grid for heatmap
     dense_candidates, (dense_XX, dense_YY) = get_candidate_states(env, density=4.0)
     print(f"Generated {len(dense_candidates)} candidate states for heatmap.")
+
+    # Determine Focus Mode settings
+    heatmap_alpha = 0.6
+    quiver_alpha = 1.0
+    if query_points:
+        heatmap_alpha = 0.2
+        quiver_alpha = 0.3
+        # Parse query points
+        # query_points is list of floats [x1, y1, x2, y2, ...]
+        q_points = []
+        for i in range(0, len(query_points), 2):
+            q_points.append((query_points[i], query_points[i + 1]))
+    else:
+        q_points = []
 
     # 4. Visualization Loop
     nrows = len(tasks)
@@ -163,6 +182,13 @@ def visualize_vector_field(
     offset_x = env.unwrapped._offset_x
     offset_y = env.unwrapped._offset_y
 
+    # Store artists for animation
+    scatter_artists = {}  # (row, col) -> scatter object
+    line_artists = {}  # (row, col) -> list of line objects
+
+    # Precompute trajectories if animating
+    trajectories_data = {}  # (row, col) -> physical_trajectory [steps, num_samples, 2]
+
     for row_idx, task_id in enumerate(tasks):
         # Setup Task
         env.reset(options={"task_id": task_id})
@@ -178,14 +204,10 @@ def visualize_vector_field(
             print(f"Processing {agent_name} - Task {task_id}...")
 
             # --- A. Value Heatmap ---
-            # Batch inputs
-            obs_batch = jnp.array(dense_candidates)  # State is XY
+            obs_batch = jnp.array(dense_candidates)
             goal_batch = jnp.tile(goal_rep, (len(dense_candidates), 1))
-
-            # Compute Values
             values = get_values(agent, obs_batch, goal_batch)
 
-            # Filter for Crop (Heatmap)
             plot_dense_candidates = dense_candidates
             plot_values = values
 
@@ -200,36 +222,33 @@ def visualize_vector_field(
                 plot_dense_candidates = dense_candidates[mask]
                 plot_values = values[mask]
 
-            # Interpolate for heatmap
             cntr = ax.tricontourf(
                 plot_dense_candidates[:, 0],
                 plot_dense_candidates[:, 1],
                 plot_values,
                 levels=20,
                 cmap="viridis",
-                alpha=0.6,
+                alpha=heatmap_alpha,
             )
 
-            # Add Colorbar if single plot
             if nrows * ncols == 1:
                 fig.colorbar(cntr, ax=ax, label="Value")
 
             # --- B. Vector Field (Quiver) ---
-            # Revert to Quiver as requested, with better styling.
-            # We use the 'candidates' grid which is already filtered for valid points.
-
             obs_batch = jnp.array(candidates)
             goal_batch = jnp.tile(goal_rep, (len(candidates), 1))
 
-            # Sample Latent Subgoals
-            rng = jax.random.PRNGKey(42)
-            target_reps = agent.sample_high_actions(obs_batch, goal_batch, seed=rng)
+            rng = jax.random.PRNGKey(0)
+            if agent_name == "HIQL":
+                target_reps = agent.sample_high_actions(
+                    obs_batch, goal_batch, seed=rng, temperature=0.0
+                )
+            else:
+                target_reps = agent.sample_high_actions(obs_batch, goal_batch, seed=rng)
 
-            # Retrieve Nearest Physical Subgoals
             retrieval_candidates = candidates
-
             vectors = []
-            chunk_size = 50  # Reduced chunk size to prevent OOM
+            chunk_size = 50
 
             for i in range(0, len(candidates), chunk_size):
                 s_chunk = obs_batch[i : i + chunk_size]
@@ -257,7 +276,6 @@ def visualize_vector_field(
 
             vectors = np.concatenate(vectors, axis=0)
 
-            # Filter for Crop (Vector Field)
             plot_candidates = candidates
             plot_vectors = vectors
 
@@ -272,9 +290,6 @@ def visualize_vector_field(
                 plot_candidates = candidates[mask]
                 plot_vectors = vectors[mask]
 
-            # Quiver Plot
-            # zorder=10 (Top)
-            # small head, thin body
             ax.quiver(
                 plot_candidates[:, 0],
                 plot_candidates[:, 1],
@@ -284,16 +299,119 @@ def visualize_vector_field(
                 scale=None,
                 scale_units="xy",
                 angles="xy",
-                headwidth=3,  # Smaller head
+                headwidth=3,
                 headlength=4,
                 headaxislength=3.5,
-                width=0.002,  # Thinner body
+                width=0.002,
                 zorder=10,
+                alpha=quiver_alpha,
             )
 
-            # --- C. Plot Maze Walls ---
-            # zorder=1 (Middle, above heatmap, below quiver)
-            # alpha=0.4 (Semi-transparent)
+            # --- C. Stochastic Scatter Overlay / Animation Prep ---
+            if q_points:
+                for qx, qy in q_points:
+                    q_obs = jnp.array([[qx, qy]])
+                    q_obs_batch = jnp.tile(q_obs, (num_samples, 1))
+                    q_goal_batch = jnp.tile(goal_rep[None, :], (num_samples, 1))
+                    rng_sample = jax.random.PRNGKey(np.random.randint(0, 10000))
+
+                    if animate and hasattr(agent, "sample_high_actions_trajectory"):
+                        # Get full trajectory: [steps, batch, dim]
+                        latent_traj = agent.sample_high_actions_trajectory(
+                            q_obs_batch, q_goal_batch, seed=rng_sample
+                        )
+                        steps = latent_traj.shape[0]
+
+                        # Map to physical subgoals for each step
+                        physical_traj = []
+
+                        # Precompute phi for query point and all candidates
+                        s_flat_q = jnp.tile(q_obs, (len(candidates), 1))
+                        w_flat_q = jnp.array(candidates)
+                        phi_q = get_goal_representations(
+                            agent, s_flat_q, w_flat_q
+                        )  # (num_candidates, rep_dim)
+
+                        for k in range(steps):
+                            z_step = latent_traj[k]  # (num_samples, rep_dim)
+                            scores_q = jnp.einsum("bd,nd->bn", z_step, phi_q)
+                            best_indices_q = jnp.argmax(scores_q, axis=1)
+                            best_subgoals_q = candidates[
+                                best_indices_q
+                            ]  # (num_samples, 2)
+                            physical_traj.append(best_subgoals_q)
+
+                        physical_traj = np.array(
+                            physical_traj
+                        )  # [steps, num_samples, 2]
+                        trajectories_data[(row_idx, col_idx)] = physical_traj
+
+                        # Initialize Scatter (Frame 0)
+                        scat = ax.scatter(
+                            physical_traj[0, :, 0],
+                            physical_traj[0, :, 1],
+                            c="magenta",
+                            s=30,
+                            marker="o",
+                            edgecolors="white",
+                            linewidth=0.5,
+                            zorder=30,
+                        )
+                        scatter_artists[(row_idx, col_idx)] = scat
+
+                        # Initialize Lines
+                        lines = []
+                        for i in range(num_samples):
+                            (line,) = ax.plot(
+                                [], [], c="magenta", alpha=0.3, zorder=25, linewidth=0.5
+                            )
+                            lines.append(line)
+                        line_artists[(row_idx, col_idx)] = lines
+
+                    else:
+                        # Static Scatter (Fallback or Default)
+                        q_target_reps = agent.sample_high_actions(
+                            q_obs_batch, q_goal_batch, seed=rng_sample
+                        )
+                        s_flat_q = jnp.tile(q_obs, (len(candidates), 1))
+                        w_flat_q = jnp.array(candidates)
+                        phi_q = get_goal_representations(agent, s_flat_q, w_flat_q)
+                        scores_q = jnp.einsum("bd,nd->bn", q_target_reps, phi_q)
+                        best_indices_q = jnp.argmax(scores_q, axis=1)
+                        best_subgoals_q = candidates[best_indices_q]
+
+                        ax.scatter(
+                            best_subgoals_q[:, 0],
+                            best_subgoals_q[:, 1],
+                            c="magenta",
+                            s=30,
+                            marker="o",
+                            edgecolors="white",
+                            linewidth=0.5,
+                            zorder=30,
+                        )
+                        for sx, sy in best_subgoals_q:
+                            ax.plot(
+                                [qx, sx],
+                                [qy, sy],
+                                c="magenta",
+                                alpha=0.3,
+                                zorder=25,
+                                linewidth=0.5,
+                            )
+
+                    # Query Point
+                    ax.scatter(
+                        qx,
+                        qy,
+                        c="yellow",
+                        s=100,
+                        marker="X",
+                        edgecolors="black",
+                        zorder=30,
+                    )
+
+            # --- D. Plot Maze Walls ---
             for i in range(height):
                 for j in range(width):
                     if maze_map[i, j] == 1:
@@ -309,7 +427,7 @@ def visualize_vector_field(
                         )
                         ax.add_patch(rect)
 
-            # --- D. Mark Start and Goal ---
+            # --- E. Mark Start and Goal ---
             ax.scatter(
                 start_xy[0],
                 start_xy[1],
@@ -317,7 +435,6 @@ def visualize_vector_field(
                 s=200,
                 marker="o",
                 edgecolors="black",
-                label="Start",
                 zorder=20,
             )
             ax.scatter(
@@ -327,7 +444,6 @@ def visualize_vector_field(
                 s=300,
                 marker="*",
                 edgecolors="black",
-                label="Goal",
                 zorder=20,
             )
 
@@ -345,15 +461,42 @@ def visualize_vector_field(
                 )
 
             ax.set_aspect("equal")
-            if row_idx == 0 and col_idx == 0:
-                ax.legend(loc="upper right")
 
     plt.tight_layout()
     save_dir = "impls/visualizations"
     os.makedirs(save_dir, exist_ok=True)
     save_path = os.path.join(save_dir, output_name)
-    plt.savefig(save_path)
-    print(f"Visualization saved to {save_path}")
+
+    if animate and trajectories_data:
+        print("Creating animation...")
+        # Determine max steps
+        max_steps = max(t.shape[0] for t in trajectories_data.values())
+
+        def update(frame):
+            for (r, c), traj in trajectories_data.items():
+                if frame < traj.shape[0]:
+                    # Update Scatter
+                    current_points = traj[frame]
+                    scatter_artists[(r, c)].set_offsets(current_points)
+
+                    # Update Lines (Trails)
+                    # From frame 0 to current frame
+                    # Actually, drawing trails for all particles might be heavy if we redraw everything.
+                    # Let's just draw line from start (frame 0) to current? Or full path?
+                    # Full path: traj[:frame+1, i, :]
+                    for i, line in enumerate(line_artists[(r, c)]):
+                        path = traj[: frame + 1, i, :]
+                        line.set_data(path[:, 0], path[:, 1])
+            return []
+
+        anim = FuncAnimation(
+            fig, update, frames=max_steps, blit=False
+        )  # blit=False for safety with multiple axes
+        anim.save(save_path, writer=PillowWriter(fps=2))
+        print(f"Animation saved to {save_path}")
+    else:
+        plt.savefig(save_path)
+        print(f"Visualization saved to {save_path}")
 
 
 if __name__ == "__main__":
@@ -380,6 +523,18 @@ if __name__ == "__main__":
     parser.add_argument(
         "--agents", type=str, nargs="+", help="Select specific agents to visualize"
     )
+    parser.add_argument(
+        "--query_points",
+        type=float,
+        nargs="+",
+        help="List of query points x1 y1 x2 y2 ...",
+    )
+    parser.add_argument(
+        "--num_samples", type=int, default=20, help="Number of samples per query point"
+    )
+    parser.add_argument(
+        "--animate", action="store_true", help="Generate animation for flow matching"
+    )
 
     args = parser.parse_args()
 
@@ -405,4 +560,7 @@ if __name__ == "__main__":
         config["output"],
         crop=args.crop,
         agent_names=args.agents,
+        query_points=args.query_points,
+        num_samples=args.num_samples,
+        animate=args.animate,
     )
